@@ -242,6 +242,54 @@ async function ensureMemberRow(user, fallback) {
   return data;
 }
 
+// Lets an admin create an account for a friend without logging themselves
+// out. Signing up on the main `supabase` client would replace the admin's
+// own active session with the new user's — instead this uses a throwaway
+// client with persistSession/autoRefreshToken off, so nothing here ever
+// touches the admin's stored session. No service_role key involved; this
+// only ever does what a normal signup does, just on the admin's behalf.
+export async function adminCreateAccount({ name, email, password, squad }) {
+  await ready();
+  email = email.trim().toLowerCase();
+  assertPassword(password);
+  if (!name.trim()) throw new Error("Enter a name.");
+
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    if (db.members.some((m) => m.email === email)) {
+      throw new Error("An account with that email already exists.");
+    }
+    const member = {
+      id: uid(), email, password, name: name.trim(), squad, is_admin: false, created_at: new Date().toISOString(),
+    };
+    db.members.push(member);
+    saveLocal(db);
+    return stripPassword(member);
+  }
+
+  const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+  const tempClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await tempClient.auth.signUp({
+    email, password, options: { data: { name: name.trim(), squad } },
+  });
+  if (error) throw error;
+  if (!data.session) {
+    throw new Error(
+      "Account created, but this Supabase project still requires email confirmation. " +
+      "Turn that off in Authentication → Providers → Email so accounts you create here can sign in immediately."
+    );
+  }
+  const { data: memberRow, error: insErr } = await tempClient
+    .from("members")
+    .insert({ id: data.user.id, email: data.user.email, name: name.trim(), squad, is_admin: false })
+    .select()
+    .single();
+  if (insErr) throw insErr;
+  return memberRow;
+}
+
 // ---------------------------------------------------------------------------
 // Public data API
 // ---------------------------------------------------------------------------

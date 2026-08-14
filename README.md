@@ -1,8 +1,10 @@
-# 45×5 — Gym Challenge Tracker
+# 45×20 — Gym Challenge Tracker
 
 A workout-challenge tracker for a friend group: create an account with your
-email, log sessions, see everyone's week, request sick/travel exclusions, and
-(if you're an admin) approve requests and watch for flagged entries.
+email, log sessions (today or backdated up to 7 days), see everyone's
+progress, request sick/travel exclusions, and win a 🏆 for hitting the
+monthly target. Admins approve exclusion requests and can create accounts
+for friends directly.
 
 It's a plain static site (`index.html` + a few JS/CSS files, no build step,
 no framework) that talks to a free [Supabase](https://supabase.com) Postgres
@@ -26,7 +28,7 @@ free Supabase project (10 minutes, one time).
 1. Go to [supabase.com](https://supabase.com) → **New project** (the free
    tier gives you 500MB of Postgres, more than enough for this).
 2. Once it's created, open **SQL Editor → New query**, paste in the contents
-   of [`sql/schema.sql`](sql/schema.sql), and run it. This creates the
+   of [`schema.sql`](schema.sql), and run it. This creates the
    `members`, `sessions`, `exclusions` and `holidays` tables and seeds a few
    holidays. (No members are seeded — accounts are created by signing up
    through the app, see step 4.)
@@ -43,7 +45,7 @@ free Supabase project (10 minutes, one time).
 
 ## 2. Point the app at it
 
-Open [`js/config.js`](js/config.js) and fill in:
+Open [`config.js`](config.js) and fill in:
 
 ```js
 export const SUPABASE_URL = "https://xxxxxxxx.supabase.co";
@@ -52,8 +54,8 @@ export const SUPABASE_ANON_KEY = "eyJhbG...";
 
 That's it — the app automatically switches from local demo mode to the
 shared database the moment both values are non-empty. You can also tune
-`CHALLENGE` in the same file (days/week, minutes/session, squads, session
-types, exclusion reasons).
+`CHALLENGE` in the same file (days/month needed to win, minutes/session,
+squads, session types, exclusion reasons).
 
 ## 3. Deploy for free
 
@@ -87,12 +89,29 @@ Any of these work identically since it's just static files.
   password (min. 8 characters, enforced by the app) — no mobile number, no
   company SSO, no employee ID. Passwords are handled entirely by Supabase
   Auth; this app never sees or stores them itself.
+- **The challenge is monthly**: each calendar month (1st to last day), hit
+  `CHALLENGE.monthlyTargetDays` (default 20) valid days — sessions of at
+  least `minMinutes` — and you win the month (🏆). Public holidays and
+  approved sick/travel exclusions reduce the target for that month, same as
+  before.
+- **Logging is backdate-friendly, not future-friendly**: the log-session
+  date picker allows today or up to 6 days back, never a future date (both
+  enforced in the UI and re-checked before the write goes through).
 - **Nobody is admin by default.** Once your first friend signs up, promote
   them (or yourself) from Supabase's SQL Editor:
   ```sql
   update members set is_admin = true where email = 'you@example.com';
   ```
   After that, admins can promote/demote others from the app's Admin tab.
+- **Admins can create accounts for friends** directly from the Admin tab
+  (name, email, squad, and an auto-generated or custom password) and get a
+  one-time credentials panel to share with them. This uses a throwaway,
+  non-persisted Supabase client under the hood so creating someone else's
+  account never logs the admin out of their own session — no `service_role`
+  key involved, just a normal signup done on the friend's behalf.
+- **Admins can't edit or delete anyone else's logged sessions.** Their reach
+  is limited to approving/declining exclusion requests, promoting/demoting
+  admins, and creating accounts — never rewriting what someone else logged.
 - **Row Level Security is scoped to signed-in users** (`schema.sql`):
   everyone who's logged in can read all members/sessions/exclusions (that's
   the point — the group sees the group), but you can only insert or delete

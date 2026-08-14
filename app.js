@@ -2,12 +2,18 @@ import * as db from "./db.js";
 import { CHALLENGE } from "./config.js";
 
 const root = document.getElementById("root");
-const DOWS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 const GREEN = "#2f6d4f", AMBER = "#e8b45c", PALE = "#a8d4bb", DARK = "#17160f";
 const AVATAR_PAIRS = [
   ["#e4ece6", "#2f6d4f"], ["#f2e6cf", "#8a6420"], ["#e6e9f0", "#3d4a63"],
   ["#efe4e4", "#7a3f3f"], ["#e8ecdf", "#4e6321"],
 ];
+
+function generatePassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  let out = "";
+  for (let i = 0; i < 10; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
 
 const state = {
   screen: "login",
@@ -24,6 +30,7 @@ const state = {
   joinSquad: CHALLENGE.squads[0],
   tab: "home",
   logOpen: false,
+  logDate: "",
   dur: CHALLENGE.minMinutes,
   type: CHALLENGE.sessionTypes[0],
   note: "",
@@ -35,6 +42,11 @@ const state = {
   excFrom: "",
   excTo: "",
   excNote: "",
+  newMemberName: "",
+  newMemberEmail: "",
+  newMemberPassword: generatePassword(),
+  newMemberSquad: CHALLENGE.squads[0],
+  createdCredentials: null,
   members: [],
   sessions: [],
   exclusions: [],
@@ -53,16 +65,13 @@ function isoDate(d) {
   const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${dd}`;
 }
+function parseISO(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
 function todayDate() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
-  return d;
-}
-function mondayOf(date) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  const day = (d.getDay() + 6) % 7;
-  d.setDate(d.getDate() - day);
   return d;
 }
 function addDays(d, n) {
@@ -70,8 +79,34 @@ function addDays(d, n) {
   r.setDate(r.getDate() + n);
   return r;
 }
+function addMonths(d, n) {
+  return new Date(d.getFullYear(), d.getMonth() + n, 1);
+}
+function startOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function endOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0);
+}
+function startOfQuarter(d) {
+  const q = Math.floor(d.getMonth() / 3);
+  return new Date(d.getFullYear(), q * 3, 1);
+}
+function endOfQuarter(d) {
+  const q = Math.floor(d.getMonth() / 3);
+  return new Date(d.getFullYear(), q * 3 + 3, 0);
+}
+function monthsSpanned(from, to) {
+  return (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth()) + 1;
+}
 function fmtShort(d) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+function fmtMonth(d) {
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+function dowShort(d) {
+  return d.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
 }
 function initialsOf(name) {
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase();
@@ -87,6 +122,20 @@ function timeAgo(iso) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return hrs + "h ago";
   return Math.floor(hrs / 24) + "d ago";
+}
+function dateList(from, to) {
+  const out = [];
+  let d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  const end = new Date(to);
+  end.setHours(0, 0, 0, 0);
+  let guard = 0;
+  while (d <= end && guard < 400) {
+    out.push(new Date(d));
+    d = addDays(d, 1);
+    guard++;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,14 +163,43 @@ function dailyMinutesMap(memberId) {
   }
   return map;
 }
-function computeWeekView(memberId, monday) {
-  const min = CHALLENGE.minMinutes, needDays = CHALLENGE.minDays;
+
+// Progress toward the monthly challenge target for one calendar month.
+function computeMonthProgress(memberId, monthStart) {
+  const target = CHALLENGE.monthlyTargetDays, min = CHALLENGE.minMinutes;
+  const dm = dailyMinutesMap(memberId);
+  const monthEnd = endOfMonth(monthStart);
+  const totalDaysInMonth = monthEnd.getDate();
+  let doneDays = 0, excusedCount = 0, personalExcusedCount = 0, totalMinutes = 0;
+  for (let day = 1; day <= totalDaysInMonth; day++) {
+    const date = new Date(monthStart.getFullYear(), monthStart.getMonth(), day);
+    const iso = isoDate(date);
+    const mins = dm[iso] || 0;
+    totalMinutes += mins;
+    const holiday = isHoliday(iso);
+    const excused = holiday || isApprovedExclusion(memberId, iso);
+    if (excused) {
+      excusedCount++;
+      if (!holiday) personalExcusedCount++;
+    } else if (mins >= min) {
+      doneDays++;
+    }
+  }
+  const effectiveTarget = Math.max(0, target - excusedCount);
+  const won = doneDays >= effectiveTarget;
+  return { doneDays, excusedCount, personalExcusedCount, effectiveTarget, totalMinutes, won, monthStart, monthEnd };
+}
+
+// A rolling 7-day strip (today and the previous 6 days) for the home dashboard.
+function computeRollingStrip(memberId) {
+  const min = CHALLENGE.minMinutes;
   const dm = dailyMinutesMap(memberId);
   const today = todayDate();
+  const start = addDays(today, -6);
   const days = [];
-  let doneDays = 0, excusedCount = 0, personalExcusedCount = 0, totalMinutes = 0;
+  let totalMinutes = 0;
   for (let i = 0; i < 7; i++) {
-    const date = addDays(monday, i);
+    const date = addDays(start, i);
     const iso = isoDate(date);
     const mins = dm[iso] || 0;
     totalMinutes += mins;
@@ -129,91 +207,73 @@ function computeWeekView(memberId, monday) {
     const excused = holiday || isApprovedExclusion(memberId, iso);
     let entry;
     if (excused) {
-      excusedCount++;
-      if (!holiday) personalExcusedCount++;
       entry = { big: "—", small: holiday ? "holiday" : "excused", bg: "rgba(232,180,92,.14)", border: "rgba(232,180,92,.35)", fg: "#8a6420", sub: "rgba(138,100,32,.7)" };
     } else if (mins >= min) {
-      doneDays++;
       entry = { big: mins + "'", small: "logged", bg: "#e4ece6", border: "rgba(47,109,79,.25)", fg: GREEN, sub: "rgba(47,109,79,.65)" };
     } else if (mins > 0) {
       entry = { big: mins + "'", small: "under " + min, bg: "#eef4f0", border: "rgba(47,109,79,.18)", fg: "#5d7f6c", sub: "rgba(23,22,15,.4)" };
-    } else if (date > today) {
-      entry = { big: "·", small: "upcoming", bg: "#fbfaf7", border: "rgba(23,22,15,.09)", fg: "rgba(23,22,15,.25)", sub: "rgba(23,22,15,.28)" };
+    } else if (date.getTime() === today.getTime()) {
+      entry = { big: "·", small: "today", bg: "#fbfaf7", border: "rgba(23,22,15,.09)", fg: "rgba(23,22,15,.32)", sub: "rgba(23,22,15,.28)" };
     } else {
       entry = { big: "0", small: "missed", bg: "#eceae4", border: "rgba(23,22,15,.1)", fg: "rgba(23,22,15,.35)", sub: "rgba(23,22,15,.3)" };
     }
-    days.push({ date: iso, dow: DOWS[i], mins, excused, ...entry });
+    days.push({ date: iso, dow: dowShort(date), mins, excused, ...entry });
   }
-  const effectiveNeed = Math.max(0, needDays - excusedCount);
-  const cleared = doneDays >= effectiveNeed;
-  return { days, doneDays, excusedCount, personalExcusedCount, effectiveNeed, totalMinutes, cleared };
+  return { days, totalMinutes };
 }
+
 function computeStreak(memberId) {
-  let monday = mondayOf(todayDate());
-  if (todayDate() < addDays(monday, 6)) monday = addDays(monday, -7);
+  const today = todayDate();
+  let cursor = startOfMonth(today);
+  if (today < endOfMonth(cursor)) cursor = addMonths(cursor, -1);
   let count = 0;
-  while (count < 104) {
-    const view = computeWeekView(memberId, monday);
-    if (!view.cleared) break;
+  while (count < 60) {
+    const view = computeMonthProgress(memberId, cursor);
+    if (!view.won) break;
     count++;
-    monday = addDays(monday, -7);
+    cursor = addMonths(cursor, -1);
   }
   return count;
 }
-function currentWeekSnapshot() {
-  const monday = mondayOf(todayDate());
-  return state.members.map((m, i) => {
-    const view = computeWeekView(m.id, monday);
-    return { member: m, index: i, view };
-  });
+function currentMonthSnapshot() {
+  const monthStart = startOfMonth(todayDate());
+  return state.members.map((m, i) => ({ member: m, index: i, view: computeMonthProgress(m.id, monthStart) }));
 }
 function computeRank(memberId) {
-  const snap = currentWeekSnapshot();
-  snap.sort((a, b) => (b.view.cleared - a.view.cleared) || (b.view.doneDays - a.view.doneDays) || (b.view.totalMinutes - a.view.totalMinutes));
+  const snap = currentMonthSnapshot();
+  snap.sort((a, b) => (b.view.won - a.view.won) || (b.view.doneDays - a.view.doneDays) || (b.view.totalMinutes - a.view.totalMinutes));
   const idx = snap.findIndex((s) => s.member.id === memberId);
   return { rank: idx + 1, of: snap.length };
 }
+function hasWonCurrentMonth(memberId) {
+  return computeMonthProgress(memberId, startOfMonth(todayDate())).won;
+}
 function rangeToDates() {
   const today = todayDate();
-  const thisMonday = mondayOf(today);
   switch (state.range) {
     case "This week":
-      return { from: thisMonday, to: addDays(thisMonday, 6), label: "This week" };
-    case "Last week": {
-      const m = addDays(thisMonday, -7);
-      return { from: m, to: addDays(m, 6), label: "Last week" };
+      return { from: addDays(today, -6), to: today, label: "This week" };
+    case "This month": {
+      const from = startOfMonth(today);
+      const end = endOfMonth(from);
+      return { from, to: today < end ? today : end, label: "This month" };
     }
-    case "Month to date":
-      return { from: new Date(today.getFullYear(), today.getMonth(), 1), to: today, label: "Month to date" };
+    case "This quarter": {
+      const from = startOfQuarter(today);
+      const end = endOfQuarter(from);
+      return { from, to: today < end ? today : end, label: "This quarter" };
+    }
     case "Full cycle": {
       const earliest = state.sessions.reduce((min, s) => (s.session_date < min ? s.session_date : min), isoDate(today));
       return { from: parseISO(earliest), to: today, label: "Full cycle" };
     }
     case "Custom": {
       if (state.customFrom && state.customTo) return { from: parseISO(state.customFrom), to: parseISO(state.customTo), label: "Custom range" };
-      return { from: thisMonday, to: addDays(thisMonday, 6), label: "Custom range" };
+      return { from: addDays(today, -6), to: today, label: "Custom range" };
     }
     default:
-      return { from: thisMonday, to: addDays(thisMonday, 6), label: "This week" };
+      return { from: addDays(today, -6), to: today, label: "This week" };
   }
-}
-function parseISO(s) {
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-function dateList(from, to) {
-  const out = [];
-  let d = new Date(from);
-  d.setHours(0, 0, 0, 0);
-  const end = new Date(to);
-  end.setHours(0, 0, 0, 0);
-  let guard = 0;
-  while (d <= end && guard < 400) {
-    out.push(new Date(d));
-    d = addDays(d, 1);
-    guard++;
-  }
-  return out;
 }
 function filteredMembers() {
   if (state.squadFilter === "All squads") return state.members;
@@ -231,10 +291,13 @@ function rowStatus(memberId, from, to) {
     if (isExcludedDay(memberId, iso)) excused++;
     else if (mins >= min) cleared++;
   }
-  const weeks = Math.max(1, Math.round(dates.length / 7));
-  const target = Math.max(0, CHALLENGE.minDays * weeks - excused);
+  if (dates.length <= 7) {
+    return { total, cleared, excused, status: null };
+  }
+  const months = Math.max(1, monthsSpanned(from, to));
+  const target = Math.max(0, CHALLENGE.monthlyTargetDays * months - excused);
   const ok = cleared >= target;
-  const behind = cleared >= target - 1;
+  const behind = cleared >= target - 2;
   return { total, cleared, excused, status: ok ? "CLEAR" : behind ? "CLOSE" : "BEHIND" };
 }
 
@@ -286,13 +349,13 @@ function renderLogin() {
   <div style="padding:56px 60px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb">
     <div style="display:flex;align-items:center;gap:10px">
       <div style="width:26px;height:26px;border-radius:7px;background:#7fd6a2"></div>
-      <span style="font:600 15px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.minDays}</span>
+      <span style="font:600 15px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
     </div>
     <div style="max-width:430px;display:flex;flex-direction:column;gap:22px">
-      <h1 style="margin:0;font:600 46px/1.06 'Archivo',sans-serif;letter-spacing:-.02em;text-wrap:pretty">Five days.<br>Forty-five minutes.<br>Everyone watching.</h1>
-      <p style="margin:0;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group challenge log. Mark your session, see everyone else's week, and keep the streak honest.</p>
+      <h1 style="margin:0;font:600 46px/1.06 'Archivo',sans-serif;letter-spacing:-.02em;text-wrap:pretty">${CHALLENGE.monthlyTargetDays} days.<br>${CHALLENGE.minMinutes} minutes.<br>Every month.</h1>
+      <p style="margin:0;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group challenge log. Mark your session, see everyone else's progress, and keep the streak honest.</p>
       <div style="display:flex;gap:26px;padding-top:6px;font-family:'IBM Plex Mono',monospace">
-        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.minDays}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / week</div></div>
+        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.monthlyTargetDays}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / month</div></div>
         <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.minMinutes}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">min / session</div></div>
         <div><div style="font-size:26px;font-weight:600;color:#e8b45c">3</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">valid excuses</div></div>
       </div>
@@ -361,10 +424,9 @@ function renderApp() {
   const me = currentMember();
   if (!me) return renderLogin();
   if (state.tab === "admin" && !me.is_admin) state.tab = "home";
-  const monday = mondayOf(todayDate());
-  const view = computeWeekView(me.id, monday);
+  const today = todayDate();
+  const view = computeMonthProgress(me.id, startOfMonth(today));
   const pendingCount = state.exclusions.filter((e) => e.status === "PENDING").length;
-  const flagCount = computeFlags().length;
 
   const navDefs = [
     { key: "home", label: "My dashboard", dot: "#7fd6a2" },
@@ -382,7 +444,7 @@ function renderApp() {
   const [avBg, avFg] = avatarOf(state.members.findIndex((m) => m.id === me.id));
 
   const titles = {
-    home: [`This week · ${esc(CHALLENGE.cycleLabel)}`, `Hey ${esc(me.name.split(" ")[0])} — keep the week honest`],
+    home: [`This month · ${esc(CHALLENGE.cycleLabel)}`, `Hey ${esc(me.name.split(" ")[0])} — keep the month honest`],
     team: ["Group attendance", "Team log"],
     exclusions: ["Sick · travel · holidays", "Exclusions"],
     admin: ["Challenge owner tools", "Admin"],
@@ -399,19 +461,19 @@ function renderApp() {
   <aside style="background:${DARK};color:#f2f0eb;padding:22px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh">
     <div style="display:flex;align-items:center;gap:9px;padding:0 8px">
       <div style="width:24px;height:24px;border-radius:7px;background:#7fd6a2"></div>
-      <span style="font:600 14.5px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.minDays}</span>
+      <span style="font:600 14.5px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
     </div>
     <nav style="display:flex;flex-direction:column;gap:3px">${nav}</nav>
     <button data-action="open-log" style="height:40px;border:0;border-radius:9px;background:#7fd6a2;color:#17160f;font-weight:600;font-size:13.5px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px">
       <span style="font-size:16px;line-height:1">+</span> Log a session
     </button>
     <div style="margin-top:auto;padding:12px;border-radius:11px;background:rgba(242,240,235,.06);display:flex;flex-direction:column;gap:9px">
-      <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.42);font-weight:600">Your week</div>
+      <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.42);font-weight:600">This month${view.won ? " · 🏆" : ""}</div>
       <div style="display:flex;align-items:baseline;gap:6px;font-family:'IBM Plex Mono',monospace">
-        <span style="font-size:24px;font-weight:600">${view.doneDays}</span><span style="font-size:13px;color:rgba(242,240,235,.45)">/ ${view.effectiveNeed} days</span>
+        <span style="font-size:24px;font-weight:600">${view.doneDays}</span><span style="font-size:13px;color:rgba(242,240,235,.45)">/ ${view.effectiveTarget} days</span>
       </div>
-      <div style="height:5px;border-radius:3px;background:rgba(242,240,235,.14);overflow:hidden"><div style="height:100%;width:${Math.min(100, Math.round((view.doneDays / Math.max(1, view.effectiveNeed)) * 100))}%;background:#7fd6a2"></div></div>
-      <div style="font-size:11.5px;color:rgba(242,240,235,.55)">${view.cleared ? "Week cleared. Anything more is bonus." : (view.effectiveNeed - view.doneDays) + " more to clear the week"}</div>
+      <div style="height:5px;border-radius:3px;background:rgba(242,240,235,.14);overflow:hidden"><div style="height:100%;width:${Math.min(100, Math.round((view.doneDays / Math.max(1, view.effectiveTarget)) * 100))}%;background:#7fd6a2"></div></div>
+      <div style="font-size:11.5px;color:rgba(242,240,235,.55)">${view.won ? "Challenge cleared. Anything more is bonus." : (view.effectiveTarget - view.doneDays) + " more to win the month"}</div>
     </div>
     <div style="display:flex;align-items:center;gap:9px;padding:8px;border-top:1px solid rgba(242,240,235,.1)">
       <div style="width:28px;height:28px;border-radius:50%;background:${avBg};color:${avFg};display:flex;align-items:center;justify-content:center;font:600 11px 'IBM Plex Mono',monospace">${initialsOf(me.name)}</div>
@@ -427,7 +489,7 @@ function renderApp() {
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <div style="display:flex;align-items:center;gap:7px;height:36px;padding:0 12px;border-radius:8px;background:#fff;border:1px solid rgba(23,22,15,.1);font-size:12.5px;color:rgba(23,22,15,.6)">
-          <span style="width:6px;height:6px;border-radius:50%;background:#7fd6a2"></span>${fmtShort(monday)} – ${fmtShort(addDays(monday, 6))}
+          <span style="width:6px;height:6px;border-radius:50%;background:#7fd6a2"></span>${fmtShort(addDays(today, -6))} – ${fmtShort(today)}
         </div>
         <button data-action="open-log" style="height:36px;padding:0 14px;border:0;border-radius:8px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:13px;cursor:pointer">Log session</button>
       </div>
@@ -435,7 +497,7 @@ function renderApp() {
     ${body}
   </main>
 </div>
-${state.logOpen ? renderLogModal(view) : ""}`;
+${state.logOpen ? renderLogModal(view, me) : ""}`;
 }
 
 function computeFeed() {
@@ -444,7 +506,7 @@ function computeFeed() {
     const m = state.members.find((mm) => mm.id === s.member_id);
     if (!m) continue;
     const valid = s.minutes >= CHALLENGE.minMinutes;
-    items.push({ ts: s.created_at, name: m.name, action: `logged ${s.minutes} min`, meta: `${s.type}${s.note ? " · " + s.note : ""}`, tag: valid ? "Valid" : "Short" });
+    items.push({ ts: s.created_at, name: m.name, action: `logged ${s.minutes} min`, meta: `${s.type}${s.note ? " · " + s.note : ""} · ${s.session_date}`, tag: valid ? "Valid" : "Short" });
   }
   for (const e of state.exclusions) {
     const m = state.members.find((mm) => mm.id === e.member_id);
@@ -462,24 +524,32 @@ function computeFlags() {
     if (s.minutes >= 100) flags.push({ name: m.name, what: `logged ${s.minutes} min — unusually long session`, when: s.session_date });
     const created = new Date(s.created_at);
     const logged = parseISO(s.session_date);
-    if ((created - logged) / 86400000 > 2) flags.push({ name: m.name, what: `backdated entry for ${s.session_date}`, when: isoDate(created) });
+    if ((created - logged) / 86400000 > 7) flags.push({ name: m.name, what: `logged for ${s.session_date}, more than 7 days after the fact`, when: isoDate(created) });
   }
   return flags.slice(-10).reverse();
 }
 
 function renderHome(me, view) {
   const rank = computeRank(me.id);
-  const allMinutesThisWeek = currentWeekSnapshot().reduce((a, s) => a + s.view.totalMinutes, 0);
-  const groupMedian = state.members.length ? Math.round(allMinutesThisWeek / state.members.length) : 0;
-  const avg = view.days.filter((d) => d.mins > 0).length ? Math.round(view.totalMinutes / view.days.filter((d) => d.mins > 0).length) : 0;
-  const longest = Math.max(0, ...view.days.map((d) => d.mins));
+  const strip = computeRollingStrip(me.id);
+  const snap = currentMonthSnapshot();
+  const monthlyMinutesAll = snap.reduce((a, s) => a + s.view.totalMinutes, 0);
+  const groupMedian = state.members.length ? Math.round(monthlyMinutesAll / state.members.length) : 0;
+  const avg7 = strip.days.filter((d) => d.mins > 0).length ? Math.round(strip.totalMinutes / strip.days.filter((d) => d.mins > 0).length) : 0;
+  const longest7 = Math.max(0, ...strip.days.map((d) => d.mins));
   const streak = computeStreak(me.id);
 
+  const trophyBanner = view.won ? `
+  <div style="background:linear-gradient(135deg, rgba(232,180,92,.2), rgba(232,180,92,.06));border:1px solid rgba(232,180,92,.4);border-radius:14px;padding:16px 20px;display:flex;align-items:center;gap:14px">
+    <span style="font-size:34px;line-height:1">🏆</span>
+    <div><div style="font:600 16px/1.2 'Archivo',sans-serif;color:#8a6420">Challenge cleared for ${fmtMonth(view.monthStart)}!</div><div style="font-size:12.5px;color:rgba(23,22,15,.55);margin-top:3px">${view.doneDays} valid days logged. Anything more from here is a victory lap.</div></div>
+  </div>` : "";
+
   const kpis = [
-    { label: "Days logged", value: `${view.doneDays}/${view.effectiveNeed}`, unit: "this week", note: view.cleared ? "Week cleared. Anything more is bonus." : (view.effectiveNeed - view.doneDays) + " more to clear the week", color: view.cleared ? GREEN : DARK },
-    { label: "Minutes", value: view.totalMinutes, unit: "min", note: `Group median ${groupMedian} min`, color: DARK },
-    { label: "Streak", value: streak, unit: "weeks", note: streak ? "Keep it going" : "Clear this week to start one", color: GREEN },
-    { label: "Rank", value: "#" + rank.rank, unit: "of " + rank.of, note: "This week's standings", color: AMBER },
+    { label: "Days logged", value: `${view.doneDays}/${view.effectiveTarget}`, unit: "this month", note: view.won ? "Challenge cleared 🏆" : (view.effectiveTarget - view.doneDays) + " more to win the month", color: view.won ? GREEN : DARK },
+    { label: "Minutes", value: view.totalMinutes, unit: "min", note: `Group median ${groupMedian} min this month`, color: DARK },
+    { label: "Streak", value: streak, unit: "months", note: streak ? "Keep it going" : "Win this month to start one", color: GREEN },
+    { label: "Rank", value: "#" + rank.rank, unit: "of " + rank.of, note: "This month's standings", color: AMBER },
   ];
   const kpiHtml = kpis.map((k) => `
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:13px;padding:16px 17px;display:flex;flex-direction:column;gap:11px">
@@ -491,7 +561,7 @@ function renderHome(me, view) {
       <div style="font-size:12px;color:rgba(23,22,15,.5)">${esc(k.note)}</div>
     </div>`).join("");
 
-  const weekHtml = view.days.map((d) => `
+  const stripHtml = strip.days.map((d) => `
     <div style="display:flex;flex-direction:column;gap:7px;align-items:center">
       <div style="font-size:11px;font-weight:600;color:rgba(23,22,15,.4);letter-spacing:.06em">${d.dow}</div>
       <div style="width:100%;height:96px;border-radius:10px;border:1px solid ${d.border};background:${d.bg};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px">
@@ -500,20 +570,19 @@ function renderHome(me, view) {
       </div>
     </div>`).join("");
 
-  const snap = currentWeekSnapshot();
-  const cleared5 = snap.filter((s) => s.view.cleared).length;
-  const onExclusion = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount > 0).length;
-  const behind = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount === 0 && (s.view.effectiveNeed - s.view.doneDays) >= 2).length;
-  const onPace = Math.max(0, snap.length - cleared5 - onExclusion - behind);
-  const pct = snap.length ? Math.round((cleared5 / snap.length) * 100) : 0;
+  const won = snap.filter((s) => s.view.won).length;
+  const onExclusion = snap.filter((s) => !s.view.won && s.view.personalExcusedCount > 0).length;
+  const behind = snap.filter((s) => !s.view.won && s.view.personalExcusedCount === 0 && (s.view.effectiveTarget - s.view.doneDays) > 3).length;
+  const closeToTarget = Math.max(0, snap.length - won - onExclusion - behind);
+  const pct = snap.length ? Math.round((won / snap.length) * 100) : 0;
   const pulseBars = [
-    { label: `Cleared ${view.effectiveNeed} days`, value: cleared5, color: "#7fd6a2" },
-    { label: "On pace, 1 short", value: onPace, color: PALE },
+    { label: `Cleared ${view.effectiveTarget} days`, value: won, color: "#7fd6a2" },
+    { label: "Close, 3 or fewer to go", value: closeToTarget, color: PALE },
     { label: "Behind pace", value: behind, color: AMBER },
     { label: "On exclusion", value: onExclusion, color: "rgba(242,240,235,.3)" },
   ].map((b) => ({ ...b, pct: snap.length ? Math.round((b.value / snap.length) * 100) + "%" : "0%" }));
 
-  const nudges = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount === 0).slice(0, 3).map((s) => s.member.name.split(" ")[0]);
+  const nudges = snap.filter((s) => !s.view.won && s.view.personalExcusedCount === 0).slice(0, 3).map((s) => s.member.name.split(" ")[0]);
 
   const feed = computeFeed();
   const feedHtml = feed.map((f, i) => {
@@ -535,18 +604,19 @@ function renderHome(me, view) {
 
   return `
 <div style="display:flex;flex-direction:column;gap:20px">
+  ${trophyBanner}
   <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">${kpiHtml}</div>
   <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px">
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:18px">
-        <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Your week</h3>
-        <span style="font-size:12px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace">${view.totalMinutes} min total</span>
+        <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Last 7 days</h3>
+        <span style="font-size:12px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace">${strip.totalMinutes} min total</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:9px">${weekHtml}</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:9px">${stripHtml}</div>
       <div style="margin-top:16px;padding-top:15px;border-top:1px solid rgba(23,22,15,.08);display:flex;gap:20px;font-size:12px;color:rgba(23,22,15,.5)">
-        <span>Streak <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${streak} weeks</strong></span>
-        <span>Avg session <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avg} min</strong></span>
-        <span>Longest <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${longest} min</strong></span>
+        <span>Streak <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${streak} months</strong></span>
+        <span>Avg session (7d) <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avg7} min</strong></span>
+        <span>Longest (7d) <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${longest7} min</strong></span>
       </div>
     </div>
     <div style="background:${DARK};color:#f2f0eb;border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
@@ -556,7 +626,7 @@ function renderHome(me, view) {
           <span style="font-size:38px;font-weight:600;letter-spacing:-.03em;color:#7fd6a2">${pct}%</span>
           <span style="font-size:14px;color:rgba(242,240,235,.5)">on track</span>
         </div>
-        <div style="font-size:12.5px;color:rgba(242,240,235,.55);margin-top:6px">${cleared5} of ${snap.length} teammates have cleared ${view.effectiveNeed}×${CHALLENGE.minMinutes} this week.</div>
+        <div style="font-size:12.5px;color:rgba(242,240,235,.55);margin-top:6px">${won} of ${snap.length} teammates have cleared ${view.effectiveTarget} days this month.</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
         ${pulseBars.map((b) => `
@@ -588,7 +658,7 @@ function renderTeam(me) {
   const min = CHALLENGE.minMinutes;
   const members = filteredMembers();
 
-  const ranges = ["This week", "Last week", "Month to date", "Full cycle", "Custom"].map((r) => `
+  const ranges = ["This week", "This month", "This quarter", "Full cycle", "Custom"].map((r) => `
     <button data-action="set-range" data-range="${r}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.range === r ? "600" : "400"};border:1px solid ${state.range === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.range === r ? "#17160f" : "#fff"};color:${state.range === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${r}</button>`).join("");
   const squadOptions = ["All squads", ...CHALLENGE.squads].map((s) => `<option ${s === state.squadFilter ? "selected" : ""}>${esc(s)}</option>`).join("");
 
@@ -596,60 +666,63 @@ function renderTeam(me) {
     const [bg, fg] = avatarOf(i);
     const dm = dailyMinutesMap(m.id);
     const st = rowStatus(m.id, from, to);
+    const won = hasWonCurrentMonth(m.id);
     let dayCells = "";
     if (showDayGrid) {
       dayCells = dates.map((d) => {
         const iso = isoDate(d);
         const mins = dm[iso] || 0;
         const excused = isExcludedDay(m.id, iso);
-        const dowLabel = DOWS[(d.getDay() + 6) % 7];
         if (excused) return `<div title="${fmtShort(d)} — excused" style="height:34px;border-radius:7px;background:rgba(232,180,92,.2);color:#8a6420;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">EX</div>`;
         if (mins >= min) return `<div title="${fmtShort(d)} — ${mins} min" style="height:34px;border-radius:7px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
         if (mins > 0) return `<div title="${fmtShort(d)} — ${mins} min (under ${min})" style="height:34px;border-radius:7px;background:${PALE};color:#1e4633;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
-        const weekend = dowLabel === "SAT" || dowLabel === "SUN";
-        return `<div title="${fmtShort(d)} — no session" style="height:34px;border-radius:7px;background:${weekend ? "#f5f4f0" : "#eceae4"}"></div>`;
+        return `<div title="${fmtShort(d)} — no session" style="height:34px;border-radius:7px;background:#eceae4"></div>`;
       }).join("");
     }
+    const statusBadge = st.status === null
+      ? `<span style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:4px 7px;border-radius:20px;background:#f0efeb;color:rgba(23,22,15,.35)">—</span>`
+      : `<span style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:4px 7px;border-radius:20px;background:${st.status === "CLEAR" ? "#e4ece6" : st.status === "CLOSE" ? "rgba(232,180,92,.18)" : "#eceae4"};color:${st.status === "CLEAR" ? GREEN : st.status === "CLOSE" ? "#8a6420" : "rgba(23,22,15,.5)"}">${st.status}</span>`;
     return `
     <div style="display:grid;grid-template-columns:210px ${showDayGrid ? "repeat(" + dates.length + ",1fr)" : "1fr"} 96px 74px;gap:6px;align-items:center;padding:5px 0;border-top:1px solid rgba(23,22,15,.06)">
       <div style="display:flex;align-items:center;gap:10px;min-width:0">
         <div style="width:28px;height:28px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 10.5px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
-        <div style="min-width:0"><div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.name)}${m.id === me.id ? " (you)" : ""}</div><div style="font-size:10.5px;color:rgba(23,22,15,.4)">${esc(m.squad)}</div></div>
+        <div style="min-width:0"><div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.name)}${m.id === me.id ? " (you)" : ""}${won ? " 🏆" : ""}</div><div style="font-size:10.5px;color:rgba(23,22,15,.4)">${esc(m.squad)}</div></div>
       </div>
       ${showDayGrid ? dayCells : `<div style="font-size:12px;color:rgba(23,22,15,.45)">${st.cleared} days cleared · ${st.excused} excused</div>`}
       <div style="text-align:right;font:600 12.5px 'IBM Plex Mono',monospace">${st.total}</div>
-      <div style="text-align:right"><span style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:4px 7px;border-radius:20px;background:${st.status === "CLEAR" ? "#e4ece6" : st.status === "CLOSE" ? "rgba(232,180,92,.18)" : "#eceae4"};color:${st.status === "CLEAR" ? GREEN : st.status === "CLOSE" ? "#8a6420" : "rgba(23,22,15,.5)"}">${st.status}</span></div>
+      <div style="text-align:right">${statusBadge}</div>
     </div>`;
   }).join("");
 
   const dowHeadsHtml = showDayGrid ? dates.map((d) => {
-    const dow = DOWS[(d.getDay() + 6) % 7];
-    return `<div style="text-align:center;font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:${dow === "SAT" || dow === "SUN" ? "rgba(23,22,15,.28)" : "rgba(23,22,15,.45)"}">${dow} ${d.getDate()}</div>`;
+    const dow = dowShort(d);
+    return `<div style="text-align:center;font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:rgba(23,22,15,.45)">${dow.slice(0, 3)} ${d.getDate()}</div>`;
   }).join("") : `<div style="font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:rgba(23,22,15,.4)">SUMMARY</div>`;
 
-  // minutes by day chart (aggregate across range, bucketed by weekday)
-  const barTotals = [0, 0, 0, 0, 0, 0, 0];
+  const barTotals = {};
+  const barOrder = [];
   for (const m of members) {
     const dm = dailyMinutesMap(m.id);
     for (const d of dates) {
-      const idx = (d.getDay() + 6) % 7;
-      barTotals[idx] += dm[isoDate(d)] || 0;
+      const key = dowShort(d);
+      if (!(key in barTotals)) { barTotals[key] = 0; barOrder.push(key); }
+      barTotals[key] += dm[isoDate(d)] || 0;
     }
   }
-  const maxBar = Math.max(1, ...barTotals);
-  const dayBars = barTotals.map((v, i) => `
+  const maxBar = Math.max(1, ...Object.values(barTotals));
+  const dayBars = barOrder.map((k) => `
     <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
-      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${v}</span>
-      <div style="width:100%;height:${Math.round((v / maxBar) * 100)}%;border-radius:7px 7px 3px 3px;background:${i > 4 ? "#d7dcd3" : "#a8d4bb"}"></div>
-      <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${DOWS[i]}</span>
+      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${barTotals[k]}</span>
+      <div style="width:100%;height:${Math.round((barTotals[k] / maxBar) * 100)}%;border-radius:7px 7px 3px 3px;background:#a8d4bb"></div>
+      <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${k}</span>
     </div>`).join("");
 
   const squadStats = CHALLENGE.squads.map((sq) => {
     const squadMembers = state.members.filter((m) => m.squad === sq);
-    const monday = mondayOf(todayDate());
-    const snaps = squadMembers.map((m) => computeWeekView(m.id, monday));
-    const clearedPct = squadMembers.length ? Math.round((snaps.filter((v) => v.cleared).length / squadMembers.length) * 100) : 0;
-    const mins = squadMembers.reduce((a, m) => a + Object.values(dailyMinutesMap(m.id)).reduce((x, y) => x + y, 0), 0);
+    const monthStart = startOfMonth(todayDate());
+    const snaps = squadMembers.map((m) => computeMonthProgress(m.id, monthStart));
+    const clearedPct = squadMembers.length ? Math.round((snaps.filter((v) => v.won).length / squadMembers.length) * 100) : 0;
+    const mins = snaps.reduce((a, v) => a + v.totalMinutes, 0);
     return { name: sq, pct: clearedPct, mins };
   }).sort((a, b) => b.pct - a.pct);
   const squadsHtml = squadStats.map((s, i) => `
@@ -668,9 +741,9 @@ function renderTeam(me) {
     ${ranges}
     <div style="display:flex;align-items:center;gap:7px;margin-left:auto;flex-wrap:wrap">
       ${state.range === "Custom" ? `
-      <input type="date" data-bind="customFrom" value="${esc(state.customFrom)}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <input type="date" data-bind="customFrom" value="${esc(state.customFrom)}" max="${isoDate(todayDate())}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
       <span style="color:rgba(23,22,15,.35);font-size:12px">to</span>
-      <input type="date" data-bind="customTo" value="${esc(state.customTo)}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <input type="date" data-bind="customTo" value="${esc(state.customTo)}" max="${isoDate(todayDate())}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
       <button data-action="apply-custom-range" style="height:32px;padding:0 10px;border:0;border-radius:7px;background:#17160f;color:#fff;font-size:12px;cursor:pointer">Apply</button>` : ""}
       <select data-bind="squadFilter" style="height:32px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-size:12.5px">${squadOptions}</select>
       <button data-action="export-csv" style="height:32px;padding:0 12px;border:1px solid rgba(23,22,15,.16);border-radius:7px;background:#fff;font-size:12.5px;cursor:pointer">Export CSV</button>
@@ -706,7 +779,7 @@ function renderTeam(me) {
     </div>
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Squad standings</h3>
-      <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members hitting ${CHALLENGE.minDays}×${CHALLENGE.minMinutes} this week</p>
+      <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members who've cleared ${CHALLENGE.monthlyTargetDays} days this month</p>
       <div style="display:flex;flex-direction:column;gap:12px">${squadsHtml}</div>
     </div>
   </div>
@@ -741,7 +814,7 @@ function renderExclusions(me) {
 <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px;align-items:start">
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:22px">
     <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Request an exclusion</h3>
-    <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${CHALLENGE.minDays}. Public holidays are auto-excluded for everyone.</p>
+    <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${CHALLENGE.monthlyTargetDays} for the month. Public holidays are auto-excluded for everyone.</p>
     <div style="display:flex;flex-direction:column;gap:14px">
       <div>
         <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:8px">Reason</div>
@@ -770,14 +843,13 @@ function renderExclusions(me) {
 }
 
 function renderAdmin() {
-  const monday = mondayOf(todayDate());
-  const snap = currentWeekSnapshot();
-  const compliance = snap.length ? Math.round((snap.filter((s) => s.view.cleared).length / snap.length) * 100) : 0;
+  const snap = currentMonthSnapshot();
+  const compliance = snap.length ? Math.round((snap.filter((s) => s.view.won).length / snap.length) * 100) : 0;
   const pending = state.exclusions.filter((e) => e.status === "PENDING").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const totalMinutes = state.sessions.reduce((a, s) => a + s.minutes, 0);
 
   const adminStats = [
-    { label: "Group compliance", value: compliance + "%", note: "This week, " + snap.length + " members", color: GREEN },
+    { label: "Group compliance", value: compliance + "%", note: "This month, " + snap.length + " members", color: GREEN },
     { label: "Pending approvals", value: pending.length, note: pending.length ? "Oldest waiting " + Math.max(0, Math.floor((Date.now() - new Date(pending[0].created_at)) / 86400000)) + " days" : "All caught up", color: AMBER },
     { label: "Total minutes", value: totalMinutes.toLocaleString(), note: "Cycle to date, " + state.members.length + " members", color: DARK },
   ];
@@ -814,10 +886,11 @@ function renderAdmin() {
   const membersHtml = state.members.map((m, i) => {
     const [bg, fg] = avatarOf(i);
     const total = state.sessions.filter((s) => s.member_id === m.id).length;
+    const won = hasWonCurrentMonth(m.id);
     return `
     <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px">
       <div style="width:26px;height:26px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 10px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
-      <span style="font-weight:500">${esc(m.name)}</span>
+      <span style="font-weight:500">${esc(m.name)}${won ? " 🏆" : ""}</span>
       <span style="color:rgba(23,22,15,.45);font-size:11.5px">${esc(m.email)}</span>
       <span style="color:rgba(23,22,15,.4)">${esc(m.squad)}</span>
       <span style="color:rgba(23,22,15,.4)">${total} sessions</span>
@@ -826,9 +899,36 @@ function renderAdmin() {
     </div>`;
   }).join("");
 
+  const squadOptions = CHALLENGE.squads.map((s) => `<option ${s === state.newMemberSquad ? "selected" : ""}>${esc(s)}</option>`).join("");
+  const createdPanel = state.createdCredentials ? `
+    <div style="margin-bottom:14px;padding:12px 14px;border-radius:10px;background:rgba(47,109,79,.08);border:1px solid rgba(47,109,79,.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div>
+        <div style="font-size:12.5px;font-weight:600;color:${GREEN};margin-bottom:6px">Account created — share these with them:</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7">Email: <strong>${esc(state.createdCredentials.email)}</strong><br>Password: <strong>${esc(state.createdCredentials.password)}</strong></div>
+      </div>
+      <button data-action="dismiss-credentials" style="background:none;border:0;color:rgba(23,22,15,.4);font-size:12px;cursor:pointer;flex:none">Dismiss</button>
+    </div>` : "";
+
   return `
 <div style="display:flex;flex-direction:column;gap:16px">
   <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">${statsHtml}</div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Create an account for a friend</h3>
+    <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Set them up directly and share the credentials — they can change the password later if they want. You stay signed in as yourself the whole time.</p>
+    ${createdPanel}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Name</span><input data-bind="newMemberName" value="${esc(state.newMemberName)}" placeholder="Full name" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px"></label>
+      <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Squad</span><select data-bind="newMemberSquad" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px">${squadOptions}</select></label>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Email</span><input type="email" data-bind="newMemberEmail" value="${esc(state.newMemberEmail)}" placeholder="friend@example.com" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px"></label>
+      <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Password <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">auto-generated, editable</span></span><input data-bind="newMemberPassword" value="${esc(state.newMemberPassword)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px;font-family:'IBM Plex Mono',monospace"></label>
+    </div>
+    <div style="display:flex;gap:9px">
+      <button data-action="admin-create-account" style="height:42px;padding:0 16px;border:0;border-radius:9px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:13.5px;cursor:pointer">Create account</button>
+      <button data-action="regenerate-password" style="height:42px;padding:0 14px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:12.5px;cursor:pointer">New password</button>
+    </div>
+  </div>
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
     <h3 style="margin:0 0 14px;font:600 15px/1 'Archivo',sans-serif">Pending approvals</h3>
     <div style="display:flex;flex-direction:column">${pendingHtml}</div>
@@ -836,7 +936,7 @@ function renderAdmin() {
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
     <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
       <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Flagged entries</h3>
-      <span style="font-size:12px;color:rgba(23,22,15,.45)">Auto-flagged: unusual duration or backdated log</span>
+      <span style="font-size:12px;color:rgba(23,22,15,.45)">Auto-flagged: unusual duration, or logged more than 7 days after the fact</span>
     </div>
     <div style="display:flex;flex-direction:column">${flagsHtml}</div>
   </div>
@@ -850,26 +950,33 @@ function renderAdmin() {
 </div>`;
 }
 
-function renderLogModal(view) {
+function renderLogModal(view, me) {
   const min = CHALLENGE.minMinutes;
   const durColor = state.dur >= min ? GREEN : AMBER;
+  const today = todayDate();
+  const minDate = isoDate(addDays(today, -6));
+  const maxDate = isoDate(today);
   const presets = [30, 45, 60, 90].map((d) => `
     <button data-action="set-dur-preset" data-dur="${d}" style="flex:1;height:32px;border-radius:8px;cursor:pointer;font-size:12.5px;font-family:'IBM Plex Mono',monospace;font-weight:${state.dur === d ? "600" : "400"};border:1px solid ${state.dur === d ? "transparent" : "rgba(23,22,15,.14)"};background:${state.dur === d ? "#17160f" : "#fff"};color:${state.dur === d ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${d} min</button>`).join("");
   const types = CHALLENGE.sessionTypes.map((t) => `
     <button data-action="set-type" data-type="${esc(t)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.type === t ? "600" : "400"};border:1px solid ${state.type === t ? "transparent" : "rgba(23,22,15,.15)"};background:${state.type === t ? GREEN : "#fff"};color:${state.type === t ? "#fff" : "rgba(23,22,15,.7)"}">${esc(t)}</button>`).join("");
-  const nextDay = Math.min(view.effectiveNeed, view.doneDays + 1);
+  const nextDay = Math.min(view.effectiveTarget, view.doneDays + 1);
 
   return `
 <div data-action="close-log" style="position:fixed;inset:0;background:rgba(23,22,15,.5);display:flex;align-items:center;justify-content:center;padding:30px;z-index:40">
   <div data-action="stop" style="width:100%;max-width:452px;background:#f7f6f2;border-radius:16px;padding:24px 26px 26px;animation:fadeUp .18s ease both;box-shadow:0 24px 60px rgba(23,22,15,.3)">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px">
       <div>
-        <h3 style="margin:0 0 4px;font:600 20px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Log today's session</h3>
-        <p style="margin:0;font-size:12.5px;color:rgba(23,22,15,.5);font-family:'IBM Plex Mono',monospace">${todayDate().toLocaleDateString("en-US", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</p>
+        <h3 style="margin:0 0 4px;font:600 20px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Log a session</h3>
+        <p style="margin:0;font-size:12.5px;color:rgba(23,22,15,.5)">You can backdate up to 7 days — no future dates.</p>
       </div>
       <button data-action="close-log" style="width:30px;height:30px;border:0;border-radius:8px;background:rgba(23,22,15,.06);cursor:pointer;font-size:15px;color:rgba(23,22,15,.5)">×</button>
     </div>
     <div style="display:flex;flex-direction:column;gap:18px">
+      <label style="display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Date</span>
+        <input type="date" data-bind="logDate" value="${esc(state.logDate)}" min="${minDate}" max="${maxDate}" style="height:40px;padding:0 12px;border:1px solid rgba(23,22,15,.14);border-radius:9px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13.5px;outline:none">
+      </label>
       <div>
         <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">Duration</div>
         <div style="background:#fff;border:1px solid rgba(23,22,15,.1);border-radius:12px;padding:16px 18px">
@@ -892,7 +999,7 @@ function renderLogModal(view) {
       </label>
       <div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;background:rgba(47,109,79,.08)">
         <span style="width:8px;height:8px;border-radius:50%;background:#2f6d4f"></span>
-        <span style="font-size:12.5px;color:rgba(23,22,15,.65)">This will be day <strong>${nextDay}</strong> of ${view.effectiveNeed} this week.</span>
+        <span style="font-size:12.5px;color:rgba(23,22,15,.65)">This will be day <strong>${nextDay}</strong> of ${view.effectiveTarget} this month.</span>
       </div>
       <div style="display:flex;gap:9px">
         <button data-action="close-log" style="flex:none;height:44px;padding:0 16px;border:1px solid rgba(23,22,15,.16);border-radius:10px;background:#fff;font-size:13.5px;cursor:pointer">Cancel</button>
@@ -930,7 +1037,7 @@ function exportCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `45x5-team-log-${label.replace(/\s+/g, "-").toLowerCase()}-${isoDate(todayDate())}.csv`;
+  a.download = `45x${CHALLENGE.monthlyTargetDays}-team-log-${label.replace(/\s+/g, "-").toLowerCase()}-${isoDate(todayDate())}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -967,6 +1074,7 @@ root.addEventListener("click", async (ev) => {
     state.dur = CHALLENGE.minMinutes;
     state.type = CHALLENGE.sessionTypes[0];
     state.note = "";
+    state.logDate = isoDate(todayDate());
     state.logOpen = true;
     render();
     return;
@@ -1080,8 +1188,15 @@ root.addEventListener("click", async (ev) => {
     return;
   }
   if (action === "submit-log") {
+    const minDate = isoDate(addDays(todayDate(), -6));
+    const maxDate = isoDate(todayDate());
+    if (!state.logDate || state.logDate < minDate || state.logDate > maxDate) {
+      state.error = "Pick a date within the last 7 days (no future dates).";
+      render();
+      return;
+    }
     await withErrorHandling(async () => {
-      await db.logSession({ memberId: state.currentMemberId, date: isoDate(todayDate()), minutes: state.dur, type: state.type, note: state.note.trim() });
+      await db.logSession({ memberId: state.currentMemberId, date: state.logDate, minutes: state.dur, type: state.type, note: state.note.trim() });
       state.logOpen = false;
       state.note = "";
       state.tab = "home";
@@ -1131,6 +1246,42 @@ root.addEventListener("click", async (ev) => {
       await loadAll();
       render();
     });
+    return;
+  }
+  if (action === "admin-create-account") {
+    if (!state.newMemberName.trim() || !state.newMemberEmail.trim()) {
+      state.error = "Enter a name and email.";
+      render();
+      return;
+    }
+    if (state.newMemberPassword.length < 8) {
+      state.error = "Password must be at least 8 characters.";
+      render();
+      return;
+    }
+    await withErrorHandling(async () => {
+      const created = await db.adminCreateAccount({
+        name: state.newMemberName.trim(), email: state.newMemberEmail.trim(),
+        password: state.newMemberPassword, squad: state.newMemberSquad,
+      });
+      state.error = "";
+      state.createdCredentials = { email: created.email, password: state.newMemberPassword };
+      state.newMemberName = "";
+      state.newMemberEmail = "";
+      state.newMemberPassword = generatePassword();
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "regenerate-password") {
+    state.newMemberPassword = generatePassword();
+    render();
+    return;
+  }
+  if (action === "dismiss-credentials") {
+    state.createdCredentials = null;
+    render();
     return;
   }
   if (action === "reset-demo") {

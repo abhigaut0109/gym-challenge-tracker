@@ -6,8 +6,8 @@ export const SUPABASE_URL = "https://wijvvdxtanqopdkdaibd.supabase.co";
 export const SUPABASE_ANON_KEY = "sb_publishable_7tu0L-N9yxEbfxN-BUNEow_3NGHARp7";
 
 export const CHALLENGE = {
-  minDays: 5,
-  minMinutes: 45,
+  monthlyTargetDays: 20, // valid days needed within a calendar month to win it
+  minMinutes: 45,        // a session under this many minutes is logged but doesn't count
   cycleLabel: "Cycle 3",
   squads: ["Squad Iron", "Squad Tempo", "Squad Dawn"],
   sessionTypes: ["Weights", "Cardio", "Class", "Yoga", "Sport"],
