@@ -112,6 +112,16 @@ function fmtMonth(d) {
 function fmtMins(n) {
   return `${n} min${n === 1 ? "" : "s"}`;
 }
+// Pixel height (not percentage — percentage heights through nested flex
+// columns don't reliably resolve), color, and a trophy flag for a single
+// day's bar in the personal bar chart. Amber under the valid-session
+// threshold, green at or above it, plus a trophy for a standout day.
+function barVisual(value, maxValue, maxPx) {
+  const heightPx = value > 0 ? Math.max(3, Math.round((value / maxValue) * maxPx)) : 2;
+  const color = value <= 0 ? "#e3e1da" : value < CHALLENGE.minMinutes ? AMBER : GREEN;
+  const trophy = value > 60;
+  return { heightPx, color, trophy };
+}
 function dowShort(d) {
   return d.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
 }
@@ -408,13 +418,7 @@ function renderLogin() {
       ${heroIllustration()}
       <h1 style="margin:8px 0 0;font:600 44px/1.08 'Archivo',sans-serif;letter-spacing:-.02em">Show up.<br>Together.</h1>
       <p style="margin:0;max-width:400px;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group workout challenge — log it, track it, and win it together.</p>
-      <div style="display:flex;gap:26px;padding-top:10px;font-family:'IBM Plex Mono',monospace">
-        <div><div style="font-size:22px;font-weight:600;color:#7fd6a2">${CHALLENGE.monthlyTargetDays}</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / month</div></div>
-        <div><div style="font-size:22px;font-weight:600;color:#7fd6a2">${CHALLENGE.minMinutes}</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">min / session</div></div>
-        <div><div style="font-size:22px;font-weight:600;color:#e8b45c">3</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">valid excuses</div></div>
-      </div>
     </div>
-    <div style="font-size:12px;color:rgba(242,240,235,.4);font-family:'IBM Plex Mono',monospace">${esc(CHALLENGE.cycleLabel)} · ${db.DEMO_MODE ? "local demo mode" : "live"}</div>
   </div>
   <div style="display:flex;align-items:center;justify-content:center;padding:40px">
     <div style="width:100%;max-width:352px;display:flex;flex-direction:column;gap:20px">
@@ -625,12 +629,17 @@ function renderHome(me, view) {
   const homeRanges = ["This week", "This month", "This quarter", "Full cycle", "Custom"].map((r) => `
     <button data-action="set-home-range" data-range="${r}" style="height:26px;padding:0 10px;border-radius:20px;cursor:pointer;font-size:11.5px;font-weight:${state.homeRange === r ? "600" : "400"};border:1px solid ${state.homeRange === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.homeRange === r ? "#17160f" : "#fff"};color:${state.homeRange === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${r}</button>`).join("");
 
-  const barsHtml = bucketOrder.map((k) => `
-    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
-      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${bucketTotals[k]}</span>
-      <div style="width:100%;height:${Math.round((bucketTotals[k] / maxBucket) * 100)}%;min-height:2px;border-radius:7px 7px 3px 3px;background:${GREEN}"></div>
+  const barsHtml = bucketOrder.map((k) => {
+    const v = bucketTotals[k];
+    const bar = barVisual(v, maxBucket, 90);
+    return `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
+      ${bar.trophy ? `<span style="font-size:14px;line-height:1">🏆</span>` : ""}
+      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:${bar.trophy ? GREEN : "rgba(23,22,15,.5)"}">${v}</span>
+      <div style="width:100%;height:${bar.heightPx}px;border-radius:7px 7px 3px 3px;background:${bar.color}"></div>
       <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${k}</span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const mySessions = state.sessions.filter((s) => s.member_id === me.id).sort((a, b) => b.session_date.localeCompare(a.session_date) || new Date(b.created_at) - new Date(a.created_at)).slice(0, 8);
   const mySessionsHtml = mySessions.map((s) => `
@@ -695,7 +704,7 @@ function renderHome(me, view) {
         <button data-action="apply-home-range" style="height:30px;padding:0 10px;border:0;border-radius:7px;background:#17160f;color:#fff;font-size:11.5px;cursor:pointer">Apply</button>
       </div>` : ""}
       <div style="font:600 26px 'IBM Plex Mono',monospace;color:${DARK};margin-bottom:14px">${rangeTotalMinutes} <span style="font-size:13px;font-weight:500;color:rgba(23,22,15,.45)">min total</span></div>
-      <div style="display:flex;align-items:flex-end;gap:10px;height:130px">${barsHtml}</div>
+      <div style="display:flex;align-items:flex-end;gap:10px">${barsHtml}</div>
       <div style="margin-top:16px;padding-top:15px;border-top:1px solid rgba(23,22,15,.08);display:flex;gap:20px;font-size:12px;color:rgba(23,22,15,.5)">
         <span>Streak <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${streak} months</strong></span>
         <span>Avg session <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avgRange} min</strong></span>
@@ -799,12 +808,15 @@ function renderTeam(me) {
     }
   }
   const maxBar = Math.max(1, ...Object.values(barTotals));
-  const dayBars = barOrder.map((k) => `
-    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
+  const dayBars = barOrder.map((k) => {
+    const heightPx = barTotals[k] > 0 ? Math.max(3, Math.round((barTotals[k] / maxBar) * 90)) : 2;
+    return `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px">
       <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${barTotals[k]}</span>
-      <div style="width:100%;height:${Math.round((barTotals[k] / maxBar) * 100)}%;border-radius:7px 7px 3px 3px;background:#a8d4bb"></div>
+      <div style="width:100%;height:${heightPx}px;border-radius:7px 7px 3px 3px;background:#a8d4bb"></div>
       <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${k}</span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const squadStats = CHALLENGE.squads.map((sq) => {
     const squadMembers = state.members.filter((m) => m.squad === sq);
@@ -864,7 +876,7 @@ function renderTeam(me) {
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Minutes by day</h3>
       <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.45)">Whole group · ${esc(label)}</p>
-      <div style="display:flex;align-items:flex-end;gap:12px;height:150px">${dayBars}</div>
+      <div style="display:flex;align-items:flex-end;gap:12px">${dayBars}</div>
     </div>
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Squad standings</h3>
