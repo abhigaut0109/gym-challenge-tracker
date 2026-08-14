@@ -121,12 +121,19 @@ Any of these work identically since it's just static files.
   key involved, just a normal signup done on the friend's behalf.
 - **Admins can't edit or delete anyone else's logged sessions.** Their reach
   is limited to approving/declining exclusion requests, promoting/demoting
-  admins, and creating accounts — never rewriting what someone else logged.
-- **Row Level Security is scoped to signed-in users** (`schema.sql`):
-  everyone who's logged in can read all members/sessions/exclusions (that's
-  the point — the group sees the group), but you can only insert or delete
-  your *own* sessions/exclusions, and only admins can approve/decline
-  requests or promote members. See the `is_admin()` helper in the SQL file.
+  admins, reassigning squads, removing members, and creating accounts —
+  never rewriting what someone else logged.
+- **Regular members only see their own squad** (plus themselves); admins see
+  everyone. This is enforced at the database level via Row Level Security,
+  not just hidden in the UI — the API itself won't return other squads'
+  data to a non-admin. See `is_admin()` and `my_squad()` in `schema.sql`.
+- **"Removing" a member deactivates them rather than deleting the account.**
+  A true delete would need to remove the underlying Supabase Auth user,
+  which requires the `service_role` admin key — that key must never live in
+  client-side code, so there's no safe way to hard-delete from a static
+  site. Deactivating fully blocks sign-in and hides them from squad-mates;
+  an admin can still see and reactivate them from the Admin tab's "Removed"
+  section.
 - **"Reset demo data"** in the Admin tab only appears in local demo mode —
   it's disabled once Supabase is connected so nobody accidentally wipes the
   group's real logged sessions.

@@ -59,7 +59,7 @@ function seedDemoData() {
     ["kabir@example.com", "Kabir Shah", "Squad Tempo", false],
   ];
   const members = people.map(([email, name, squad, is_admin]) => ({
-    id: uid(), email, password: "password123", name, squad, is_admin, created_at: new Date().toISOString(),
+    id: uid(), email, password: "password123", name, squad, is_admin, is_active: true, created_at: new Date().toISOString(),
   }));
   const byEmail = Object.fromEntries(members.map((m) => [m.email, m.id]));
 
@@ -146,6 +146,19 @@ function stripPassword(m) {
   return rest;
 }
 
+// Which members a given viewer is allowed to see: admins see everyone,
+// everyone else sees themselves plus their own (active) squad-mates. This
+// mirrors the Supabase RLS policies for demo mode, which has no real RLS.
+function visibleMembers(allMembers, viewer) {
+  if (!viewer) return [];
+  if (viewer.is_admin) return allMembers;
+  return allMembers.filter((m) => m.id === viewer.id || (m.is_active && m.squad === viewer.squad));
+}
+function currentDemoMember(db) {
+  const id = localStorage.getItem(LS_CURRENT);
+  return db.members.find((m) => m.id === id) || null;
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -162,7 +175,7 @@ export async function signUp({ name, email, password, squad }) {
       throw new Error("An account with that email already exists — sign in instead.");
     }
     const member = {
-      id: uid(), email, password, name: name.trim(), squad, is_admin: false, created_at: new Date().toISOString(),
+      id: uid(), email, password, name: name.trim(), squad, is_admin: false, is_active: true, created_at: new Date().toISOString(),
     };
     db.members.push(member);
     saveLocal(db);
@@ -192,6 +205,9 @@ export async function signIn({ email, password }) {
     if (!member || member.password !== password) {
       throw new Error("Invalid email or password.");
     }
+    if (!member.is_active) {
+      throw new Error("Your account has been removed from this group. Contact an admin if this is a mistake.");
+    }
     localStorage.setItem(LS_CURRENT, member.id);
     return stripPassword(member);
   }
@@ -216,7 +232,12 @@ export async function getCurrentMember() {
     const id = localStorage.getItem(LS_CURRENT);
     if (!id) return null;
     const db = loadLocal();
-    return stripPassword(db.members.find((m) => m.id === id)) || null;
+    const member = db.members.find((m) => m.id === id);
+    if (!member || !member.is_active) {
+      localStorage.removeItem(LS_CURRENT);
+      return null;
+    }
+    return stripPassword(member);
   }
   const { data } = await supabase.auth.getSession();
   if (!data.session) return null;
@@ -229,7 +250,13 @@ export async function getCurrentMember() {
 async function ensureMemberRow(user, fallback) {
   const { data: existing, error: selErr } = await supabase.from("members").select("*").eq("id", user.id).maybeSingle();
   if (selErr) throw selErr;
-  if (existing) return existing;
+  if (existing) {
+    if (!existing.is_active) {
+      await supabase.auth.signOut();
+      throw new Error("Your account has been removed from this group. Contact an admin if this is a mistake.");
+    }
+    return existing;
+  }
 
   const name = fallback?.name || user.user_metadata?.name || user.email.split("@")[0];
   const squad = fallback?.squad || user.user_metadata?.squad || CHALLENGE.squads[0];
@@ -260,7 +287,7 @@ export async function adminCreateAccount({ name, email, password, squad }) {
       throw new Error("An account with that email already exists.");
     }
     const member = {
-      id: uid(), email, password, name: name.trim(), squad, is_admin: false, created_at: new Date().toISOString(),
+      id: uid(), email, password, name: name.trim(), squad, is_admin: false, is_active: true, created_at: new Date().toISOString(),
     };
     db.members.push(member);
     saveLocal(db);
@@ -296,7 +323,11 @@ export async function adminCreateAccount({ name, email, password, squad }) {
 
 export async function listMembers() {
   await ready();
-  if (DEMO_MODE) return loadLocal().members.map(stripPassword);
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const viewer = currentDemoMember(db);
+    return visibleMembers(db.members, viewer).map(stripPassword);
+  }
   const { data, error } = await supabase.from("members").select("*").order("name");
   if (error) throw error;
   return data;
@@ -325,7 +356,12 @@ export async function logSession({ memberId, date, minutes, type, note }) {
 
 export async function listSessions() {
   await ready();
-  if (DEMO_MODE) return [...loadLocal().sessions];
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const viewer = currentDemoMember(db);
+    const visibleIds = new Set(visibleMembers(db.members, viewer).map((m) => m.id));
+    return db.sessions.filter((s) => visibleIds.has(s.member_id));
+  }
   const { data, error } = await supabase.from("sessions").select("*");
   if (error) throw error;
   return data;
@@ -389,7 +425,12 @@ export async function requestExclusion({ memberId, reason, from, to, note }) {
 
 export async function listExclusions() {
   await ready();
-  if (DEMO_MODE) return [...loadLocal().exclusions];
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const viewer = currentDemoMember(db);
+    const visibleIds = new Set(visibleMembers(db.members, viewer).map((m) => m.id));
+    return db.exclusions.filter((e) => visibleIds.has(e.member_id));
+  }
   const { data, error } = await supabase.from("exclusions").select("*");
   if (error) throw error;
   return data;
@@ -431,6 +472,55 @@ export async function setMemberAdmin(id, isAdmin) {
     return stripPassword(m);
   }
   const { data, error } = await supabase.from("members").update({ is_admin: isAdmin }).eq("id", id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function setMemberSquad(id, squad) {
+  await ready();
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const m = db.members.find((mm) => mm.id === id);
+    if (m) m.squad = squad;
+    saveLocal(db);
+    return stripPassword(m);
+  }
+  const { data, error } = await supabase.from("members").update({ squad }).eq("id", id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+// "Removing" a member deactivates their account rather than deleting it.
+// A true delete would need to remove the underlying Supabase Auth user too,
+// which requires the service_role admin key — that key must never live in
+// client-side code, so there's no safe way to hard-delete from a static
+// site. Deactivating fully blocks them (they're signed out and can't sign
+// back in) and hides them from squad-mates, while an admin can still see
+// and reactivate them later.
+export async function removeMember(id) {
+  await ready();
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const m = db.members.find((mm) => mm.id === id);
+    if (m) m.is_active = false;
+    saveLocal(db);
+    return stripPassword(m);
+  }
+  const { data, error } = await supabase.from("members").update({ is_active: false }).eq("id", id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function reactivateMember(id) {
+  await ready();
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const m = db.members.find((mm) => mm.id === id);
+    if (m) m.is_active = true;
+    saveLocal(db);
+    return stripPassword(m);
+  }
+  const { data, error } = await supabase.from("members").update({ is_active: true }).eq("id", id).select().single();
   if (error) throw error;
   return data;
 }

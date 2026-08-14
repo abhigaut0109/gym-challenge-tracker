@@ -818,7 +818,8 @@ function renderTeam(me) {
     </div>`;
   }).join("");
 
-  const squadStats = CHALLENGE.squads.map((sq) => {
+  const visibleSquads = me.is_admin ? CHALLENGE.squads : [me.squad];
+  const squadStats = visibleSquads.map((sq) => {
     const squadMembers = state.members.filter((m) => m.squad === sq);
     const monthStart = startOfMonth(todayDate());
     const snaps = squadMembers.map((m) => computeMonthProgress(m.id, monthStart));
@@ -846,7 +847,9 @@ function renderTeam(me) {
       <span style="color:rgba(23,22,15,.35);font-size:12px">to</span>
       <input type="date" data-bind="customTo" value="${esc(state.customTo)}" max="${isoDate(todayDate())}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
       <button data-action="apply-custom-range" style="height:32px;padding:0 10px;border:0;border-radius:7px;background:#17160f;color:#fff;font-size:12px;cursor:pointer">Apply</button>` : ""}
-      <select data-bind="squadFilter" style="height:32px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-size:12.5px">${squadOptions}</select>
+      ${me.is_admin
+        ? `<select data-bind="squadFilter" style="height:32px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-size:12.5px">${squadOptions}</select>`
+        : `<span style="height:32px;padding:0 12px;border-radius:7px;background:#f0efeb;font-size:12.5px;color:rgba(23,22,15,.55);display:flex;align-items:center">${esc(me.squad)} only</span>`}
       <button data-action="export-csv" style="height:32px;padding:0 12px;border:1px solid rgba(23,22,15,.16);border-radius:7px;background:#fff;font-size:12.5px;cursor:pointer">Export CSV</button>
     </div>
   </div>
@@ -875,11 +878,11 @@ function renderTeam(me) {
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Minutes by day</h3>
-      <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.45)">Whole group · ${esc(label)}</p>
+      <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.45)">${me.is_admin ? "Whole group" : esc(me.squad)} · ${esc(label)}</p>
       <div style="display:flex;align-items:flex-end;gap:12px">${dayBars}</div>
     </div>
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
-      <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Squad standings</h3>
+      <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">${me.is_admin ? "Squad standings" : "Your squad"}</h3>
       <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members who've cleared ${sharedTarget} days this month</p>
       <div style="display:flex;flex-direction:column;gap:12px">${squadsHtml}</div>
     </div>
@@ -985,21 +988,39 @@ function renderAdmin() {
       <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:rgba(23,22,15,.4)">${f.when}</span>
     </div>`).join("") || `<div style="padding:14px 0;color:rgba(23,22,15,.4);font-size:13px">No flags right now.</div>`;
 
-  const membersHtml = state.members.map((m, i) => {
+  const activeMembers = state.members.filter((m) => m.is_active !== false);
+  const removedMembers = state.members.filter((m) => m.is_active === false);
+  const squadSelectOptions = (m) => CHALLENGE.squads.map((s) => `<option ${s === m.squad ? "selected" : ""}>${esc(s)}</option>`).join("");
+  const membersHtml = activeMembers.map((m, i) => {
     const [bg, fg] = avatarOf(i);
     const total = state.sessions.filter((s) => s.member_id === m.id).length;
     const won = hasWonCurrentMonth(m.id);
     return `
-    <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px">
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px;flex-wrap:wrap">
       <div style="width:26px;height:26px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 10px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
       <span style="font-weight:500">${esc(m.name)}${won ? " 🏆" : ""}</span>
       <span style="color:rgba(23,22,15,.45);font-size:11.5px">${esc(m.email)}</span>
-      <span style="color:rgba(23,22,15,.4)">${esc(m.squad)}</span>
+      <select data-action="change-member-squad" data-id="${esc(m.id)}" style="height:26px;padding:0 6px;border:1px solid rgba(23,22,15,.14);border-radius:6px;background:#fff;font-size:11.5px">${squadSelectOptions(m)}</select>
       <span style="color:rgba(23,22,15,.4)">${total} sessions</span>
       ${m.is_admin ? `<span style="font:600 10px 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:20px;background:#efe4f2;color:#7a4a8a">ADMIN</span>` : ""}
-      <button data-action="toggle-admin" data-id="${esc(m.id)}" style="margin-left:auto;background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:28px;padding:0 10px;font-size:11.5px;cursor:pointer">${m.is_admin ? "Remove admin" : "Make admin"}</button>
+      <div style="margin-left:auto;display:flex;gap:6px">
+        <button data-action="toggle-admin" data-id="${esc(m.id)}" style="background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:28px;padding:0 10px;font-size:11.5px;cursor:pointer">${m.is_admin ? "Remove admin" : "Make admin"}</button>
+        <button data-action="remove-member" data-id="${esc(m.id)}" style="background:none;border:1px solid rgba(200,80,80,.3);color:#a33;border-radius:7px;height:28px;padding:0 10px;font-size:11.5px;cursor:pointer">Remove</button>
+      </div>
     </div>`;
   }).join("");
+  const removedHtml = removedMembers.length ? `
+  <div style="margin-top:16px;padding-top:14px;border-top:1px dashed rgba(23,22,15,.15)">
+    <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.4);font-weight:600;margin-bottom:8px">Removed</div>
+    ${removedMembers.map((m, i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid rgba(23,22,15,.06);font-size:13px;opacity:.6">
+      <div style="width:26px;height:26px;border-radius:50%;background:#eceae4;color:rgba(23,22,15,.4);display:flex;align-items:center;justify-content:center;font:600 10px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
+      <span style="font-weight:500">${esc(m.name)}</span>
+      <span style="color:rgba(23,22,15,.45);font-size:11.5px">${esc(m.email)}</span>
+      <span style="color:rgba(23,22,15,.4)">${esc(m.squad)}</span>
+      <button data-action="reactivate-member" data-id="${esc(m.id)}" style="margin-left:auto;background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:28px;padding:0 10px;font-size:11.5px;cursor:pointer;opacity:1">Reactivate</button>
+    </div>`).join("")}
+  </div>` : "";
 
   const squadOptions = CHALLENGE.squads.map((s) => `<option ${s === state.newMemberSquad ? "selected" : ""}>${esc(s)}</option>`).join("");
   const createdPanel = state.createdCredentials ? `
@@ -1044,10 +1065,11 @@ function renderAdmin() {
   </div>
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
     <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
-      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Members · ${state.members.length}</h3>
+      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Members · ${activeMembers.length}</h3>
       ${db.DEMO_MODE ? `<button data-action="reset-demo" style="background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:30px;padding:0 12px;font-size:12px;cursor:pointer">Reset demo data</button>` : ""}
     </div>
     <div style="display:flex;flex-direction:column">${membersHtml}</div>
+    ${removedHtml}
   </div>
 </div>`;
 }
@@ -1408,6 +1430,24 @@ root.addEventListener("click", async (ev) => {
     });
     return;
   }
+  if (action === "remove-member") {
+    const m = state.members.find((mm) => mm.id === el.dataset.id);
+    if (!confirm(`Remove ${m ? m.name : "this member"} from the group? They'll be signed out and won't be able to sign back in. An admin can reactivate them later.`)) return;
+    await withErrorHandling(async () => {
+      await db.removeMember(el.dataset.id);
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "reactivate-member") {
+    await withErrorHandling(async () => {
+      await db.reactivateMember(el.dataset.id);
+      await loadAll();
+      render();
+    });
+    return;
+  }
   if (action === "admin-create-account") {
     if (!state.newMemberName.trim() || !state.newMemberEmail.trim()) {
       state.error = "Enter a name and email.";
@@ -1484,8 +1524,16 @@ root.addEventListener("input", (ev) => {
   const bind = el.dataset.bind;
   if (bind) state[bind] = el.value;
 });
-root.addEventListener("change", (ev) => {
+root.addEventListener("change", async (ev) => {
   const el = ev.target;
+  if (el.dataset.action === "change-member-squad") {
+    await withErrorHandling(async () => {
+      await db.setMemberSquad(el.dataset.id, el.value);
+      await loadAll();
+      render();
+    });
+    return;
+  }
   const bind = el.dataset.bind;
   if (!bind) return;
   state[bind] = el.value;
