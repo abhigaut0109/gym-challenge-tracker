@@ -205,7 +205,7 @@ export async function signIn({ email, password }) {
     if (!member || member.password !== password) {
       throw new Error("Invalid email or password.");
     }
-    if (!member.is_active) {
+    if (member.is_active === false) {
       throw new Error("Your account has been removed from this group. Contact an admin if this is a mistake.");
     }
     localStorage.setItem(LS_CURRENT, member.id);
@@ -233,7 +233,7 @@ export async function getCurrentMember() {
     if (!id) return null;
     const db = loadLocal();
     const member = db.members.find((m) => m.id === id);
-    if (!member || !member.is_active) {
+    if (!member || member.is_active === false) {
       localStorage.removeItem(LS_CURRENT);
       return null;
     }
@@ -251,7 +251,7 @@ async function ensureMemberRow(user, fallback) {
   const { data: existing, error: selErr } = await supabase.from("members").select("*").eq("id", user.id).maybeSingle();
   if (selErr) throw selErr;
   if (existing) {
-    if (!existing.is_active) {
+    if (existing.is_active === false) {
       await supabase.auth.signOut();
       throw new Error("Your account has been removed from this group. Contact an admin if this is a mistake.");
     }

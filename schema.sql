@@ -9,12 +9,11 @@
 -- asks people to click the confirmation email once before their first
 -- sign-in.)
 --
--- If you already ran the v2 schema (no is_active column, "everyone sees
--- everyone" policies), you don't need to drop and recreate everything —
--- just run the incremental block at the bottom of this file instead of
--- the whole script. Running this whole script again is also safe: every
--- statement is idempotent (create-if-not-exists / create-or-replace /
--- drop-if-exists-then-create).
+-- Already have an older version of this schema running? Just run this
+-- entire file again — every statement here is idempotent (create-if-
+-- not-exists / create-or-replace / drop-if-exists-then-create), so
+-- re-running the whole thing picks up new tables/columns/policies
+-- without needing to figure out which specific lines changed.
 
 create extension if not exists pgcrypto;
 
@@ -132,33 +131,8 @@ create policy "holidays readable by signed-in users" on holidays for select usin
 -- the admin so someone can approve exclusion requests:
 --   update members set is_admin = true where email = 'you@example.com';
 
-
--- ===========================================================================
--- INCREMENTAL MIGRATION — run just this block if you already have the v2
--- schema set up (skip everything above; this repeats the new/changed bits
--- only, and is safe to run even if some of it already exists).
--- ===========================================================================
---
--- alter table members add column if not exists is_active boolean not null default true;
---
--- create or replace function my_squad() returns text
--- language sql security definer stable as $$
---   select squad from members where id = auth.uid();
--- $$;
---
--- drop policy if exists "members readable by signed-in users" on members;
--- create policy "members readable by squad or admin" on members for select using (
---   is_admin() or auth.uid() = id or (is_active and squad = my_squad())
--- );
---
--- drop policy if exists "sessions readable by signed-in users" on sessions;
--- create policy "sessions readable by squad or admin" on sessions for select using (
---   member_id = auth.uid() or is_admin()
---   or exists (select 1 from members m where m.id = sessions.member_id and m.is_active and m.squad = my_squad())
--- );
---
--- drop policy if exists "exclusions readable by signed-in users" on exclusions;
--- create policy "exclusions readable by squad or admin" on exclusions for select using (
---   member_id = auth.uid() or is_admin()
---   or exists (select 1 from members m where m.id = exclusions.member_id and m.is_active and m.squad = my_squad())
--- );
+-- Sanity check after running this: confirm the new column and function
+-- actually exist (should return one row each; empty results mean this
+-- script didn't fully apply and you should re-run it):
+--   select column_name from information_schema.columns where table_name = 'members' and column_name = 'is_active';
+--   select proname from pg_proc where proname = 'my_squad';
