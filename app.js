@@ -1,0 +1,1184 @@
+import * as db from "./db.js";
+import { CHALLENGE } from "./config.js";
+
+const root = document.getElementById("root");
+const DOWS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const GREEN = "#2f6d4f", AMBER = "#e8b45c", PALE = "#a8d4bb", DARK = "#17160f";
+const AVATAR_PAIRS = [
+  ["#e4ece6", "#2f6d4f"], ["#f2e6cf", "#8a6420"], ["#e6e9f0", "#3d4a63"],
+  ["#efe4e4", "#7a3f3f"], ["#e8ecdf", "#4e6321"],
+];
+
+const state = {
+  screen: "login",
+  loading: true,
+  error: "",
+  info: "",
+  currentMemberId: "",
+  authView: "signin", // 'signin' | 'signup'
+  signInEmail: "",
+  signInPassword: "",
+  joinName: "",
+  joinEmail: "",
+  joinPassword: "",
+  joinSquad: CHALLENGE.squads[0],
+  tab: "home",
+  logOpen: false,
+  dur: CHALLENGE.minMinutes,
+  type: CHALLENGE.sessionTypes[0],
+  note: "",
+  range: "This week",
+  customFrom: "",
+  customTo: "",
+  squadFilter: "All squads",
+  reason: CHALLENGE.exclusionReasons[0],
+  excFrom: "",
+  excTo: "",
+  excNote: "",
+  members: [],
+  sessions: [],
+  exclusions: [],
+  holidays: [],
+};
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+function esc(str) {
+  return String(str ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function isoDate(d) {
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+function todayDate() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function mondayOf(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return d;
+}
+function addDays(d, n) {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+function fmtShort(d) {
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+function initialsOf(name) {
+  return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase();
+}
+function avatarOf(index) {
+  return AVATAR_PAIRS[index % AVATAR_PAIRS.length];
+}
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  return Math.floor(hrs / 24) + "d ago";
+}
+
+// ---------------------------------------------------------------------------
+// derived / business logic
+// ---------------------------------------------------------------------------
+function holidaySet() {
+  return new Set(state.holidays.map((h) => h.holiday_date));
+}
+function isHoliday(iso) {
+  return holidaySet().has(iso);
+}
+function isApprovedExclusion(memberId, iso) {
+  return state.exclusions.some(
+    (e) => e.member_id === memberId && e.status === "APPROVED" && iso >= e.from_date && iso <= e.to_date
+  );
+}
+function isExcludedDay(memberId, iso) {
+  return isHoliday(iso) || isApprovedExclusion(memberId, iso);
+}
+function dailyMinutesMap(memberId) {
+  const map = {};
+  for (const s of state.sessions) {
+    if (s.member_id !== memberId) continue;
+    map[s.session_date] = (map[s.session_date] || 0) + s.minutes;
+  }
+  return map;
+}
+function computeWeekView(memberId, monday) {
+  const min = CHALLENGE.minMinutes, needDays = CHALLENGE.minDays;
+  const dm = dailyMinutesMap(memberId);
+  const today = todayDate();
+  const days = [];
+  let doneDays = 0, excusedCount = 0, personalExcusedCount = 0, totalMinutes = 0;
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(monday, i);
+    const iso = isoDate(date);
+    const mins = dm[iso] || 0;
+    totalMinutes += mins;
+    const holiday = isHoliday(iso);
+    const excused = holiday || isApprovedExclusion(memberId, iso);
+    let entry;
+    if (excused) {
+      excusedCount++;
+      if (!holiday) personalExcusedCount++;
+      entry = { big: "—", small: holiday ? "holiday" : "excused", bg: "rgba(232,180,92,.14)", border: "rgba(232,180,92,.35)", fg: "#8a6420", sub: "rgba(138,100,32,.7)" };
+    } else if (mins >= min) {
+      doneDays++;
+      entry = { big: mins + "'", small: "logged", bg: "#e4ece6", border: "rgba(47,109,79,.25)", fg: GREEN, sub: "rgba(47,109,79,.65)" };
+    } else if (mins > 0) {
+      entry = { big: mins + "'", small: "under " + min, bg: "#eef4f0", border: "rgba(47,109,79,.18)", fg: "#5d7f6c", sub: "rgba(23,22,15,.4)" };
+    } else if (date > today) {
+      entry = { big: "·", small: "upcoming", bg: "#fbfaf7", border: "rgba(23,22,15,.09)", fg: "rgba(23,22,15,.25)", sub: "rgba(23,22,15,.28)" };
+    } else {
+      entry = { big: "0", small: "missed", bg: "#eceae4", border: "rgba(23,22,15,.1)", fg: "rgba(23,22,15,.35)", sub: "rgba(23,22,15,.3)" };
+    }
+    days.push({ date: iso, dow: DOWS[i], mins, excused, ...entry });
+  }
+  const effectiveNeed = Math.max(0, needDays - excusedCount);
+  const cleared = doneDays >= effectiveNeed;
+  return { days, doneDays, excusedCount, personalExcusedCount, effectiveNeed, totalMinutes, cleared };
+}
+function computeStreak(memberId) {
+  let monday = mondayOf(todayDate());
+  if (todayDate() < addDays(monday, 6)) monday = addDays(monday, -7);
+  let count = 0;
+  while (count < 104) {
+    const view = computeWeekView(memberId, monday);
+    if (!view.cleared) break;
+    count++;
+    monday = addDays(monday, -7);
+  }
+  return count;
+}
+function currentWeekSnapshot() {
+  const monday = mondayOf(todayDate());
+  return state.members.map((m, i) => {
+    const view = computeWeekView(m.id, monday);
+    return { member: m, index: i, view };
+  });
+}
+function computeRank(memberId) {
+  const snap = currentWeekSnapshot();
+  snap.sort((a, b) => (b.view.cleared - a.view.cleared) || (b.view.doneDays - a.view.doneDays) || (b.view.totalMinutes - a.view.totalMinutes));
+  const idx = snap.findIndex((s) => s.member.id === memberId);
+  return { rank: idx + 1, of: snap.length };
+}
+function rangeToDates() {
+  const today = todayDate();
+  const thisMonday = mondayOf(today);
+  switch (state.range) {
+    case "This week":
+      return { from: thisMonday, to: addDays(thisMonday, 6), label: "This week" };
+    case "Last week": {
+      const m = addDays(thisMonday, -7);
+      return { from: m, to: addDays(m, 6), label: "Last week" };
+    }
+    case "Month to date":
+      return { from: new Date(today.getFullYear(), today.getMonth(), 1), to: today, label: "Month to date" };
+    case "Full cycle": {
+      const earliest = state.sessions.reduce((min, s) => (s.session_date < min ? s.session_date : min), isoDate(today));
+      return { from: parseISO(earliest), to: today, label: "Full cycle" };
+    }
+    case "Custom": {
+      if (state.customFrom && state.customTo) return { from: parseISO(state.customFrom), to: parseISO(state.customTo), label: "Custom range" };
+      return { from: thisMonday, to: addDays(thisMonday, 6), label: "Custom range" };
+    }
+    default:
+      return { from: thisMonday, to: addDays(thisMonday, 6), label: "This week" };
+  }
+}
+function parseISO(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function dateList(from, to) {
+  const out = [];
+  let d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  const end = new Date(to);
+  end.setHours(0, 0, 0, 0);
+  let guard = 0;
+  while (d <= end && guard < 400) {
+    out.push(new Date(d));
+    d = addDays(d, 1);
+    guard++;
+  }
+  return out;
+}
+function filteredMembers() {
+  if (state.squadFilter === "All squads") return state.members;
+  return state.members.filter((m) => m.squad === state.squadFilter);
+}
+function rowStatus(memberId, from, to) {
+  const dates = dateList(from, to);
+  const min = CHALLENGE.minMinutes;
+  const dm = dailyMinutesMap(memberId);
+  let cleared = 0, excused = 0, total = 0;
+  for (const d of dates) {
+    const iso = isoDate(d);
+    const mins = dm[iso] || 0;
+    total += mins;
+    if (isExcludedDay(memberId, iso)) excused++;
+    else if (mins >= min) cleared++;
+  }
+  const weeks = Math.max(1, Math.round(dates.length / 7));
+  const target = Math.max(0, CHALLENGE.minDays * weeks - excused);
+  const ok = cleared >= target;
+  const behind = cleared >= target - 1;
+  return { total, cleared, excused, status: ok ? "CLEAR" : behind ? "CLOSE" : "BEHIND" };
+}
+
+// ---------------------------------------------------------------------------
+// data loading
+// ---------------------------------------------------------------------------
+async function loadAll() {
+  const [members, sessions, exclusions, holidays] = await Promise.all([
+    db.listMembers(), db.listSessions(), db.listExclusions(), db.listHolidays(),
+  ]);
+  state.members = members;
+  state.sessions = sessions;
+  state.exclusions = exclusions;
+  state.holidays = holidays;
+}
+async function boot() {
+  try {
+    const me = await db.getCurrentMember();
+    await loadAll();
+    if (me) {
+      state.currentMemberId = me.id;
+      if (!state.members.some((m) => m.id === me.id)) state.members.push(me);
+      state.screen = "app";
+    }
+  } catch (e) {
+    state.error = "Couldn't load data: " + (e.message || e);
+  }
+  state.loading = false;
+  render();
+}
+
+// ---------------------------------------------------------------------------
+// render
+// ---------------------------------------------------------------------------
+function render() {
+  if (state.loading) {
+    root.innerHTML = `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:rgba(23,22,15,.4);font-family:'IBM Plex Mono',monospace;font-size:13px">Loading…</div>`;
+    return;
+  }
+  root.innerHTML = state.screen === "login" ? renderLogin() : renderApp();
+}
+
+function renderLogin() {
+  const banner = state.error ? `<div style="margin-bottom:14px;padding:10px 13px;border-radius:9px;background:rgba(232,92,92,.12);color:#a33;font-size:12.5px">${esc(state.error)}</div>` : "";
+  const info = state.info ? `<div style="margin-bottom:14px;padding:10px 13px;border-radius:9px;background:rgba(47,109,79,.1);color:${GREEN};font-size:12.5px">${esc(state.info)}</div>` : "";
+  const demoHint = db.DEMO_MODE ? `<p style="margin:0;font-size:11.5px;color:rgba(23,22,15,.4);font-family:'IBM Plex Mono',monospace">Local demo — try riya@example.com / password123 (admin), or sign up your own.</p>` : "";
+  return `
+<div style="min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:#f2f0eb">
+  <div style="padding:56px 60px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="width:26px;height:26px;border-radius:7px;background:#7fd6a2"></div>
+      <span style="font:600 15px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.minDays}</span>
+    </div>
+    <div style="max-width:430px;display:flex;flex-direction:column;gap:22px">
+      <h1 style="margin:0;font:600 46px/1.06 'Archivo',sans-serif;letter-spacing:-.02em;text-wrap:pretty">Five days.<br>Forty-five minutes.<br>Everyone watching.</h1>
+      <p style="margin:0;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group challenge log. Mark your session, see everyone else's week, and keep the streak honest.</p>
+      <div style="display:flex;gap:26px;padding-top:6px;font-family:'IBM Plex Mono',monospace">
+        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.minDays}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / week</div></div>
+        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.minMinutes}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">min / session</div></div>
+        <div><div style="font-size:26px;font-weight:600;color:#e8b45c">3</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">valid excuses</div></div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:rgba(242,240,235,.4);font-family:'IBM Plex Mono',monospace">${esc(CHALLENGE.cycleLabel)} · ${db.DEMO_MODE ? "local demo mode" : "live"}</div>
+  </div>
+  <div style="display:flex;align-items:center;justify-content:center;padding:40px">
+    <div style="width:100%;max-width:352px;display:flex;flex-direction:column;gap:20px">
+      ${banner}${info}
+      ${state.authView === "signup" ? renderSignUpForm() : renderSignInForm()}
+      ${demoHint}
+      <p style="margin:2px 0 0;font-size:12px;color:rgba(23,22,15,.42);line-height:1.55">Everything you log is visible to the whole group. That's the point.</p>
+    </div>
+  </div>
+</div>`;
+}
+function renderSignInForm() {
+  return `
+<div>
+  <h2 style="margin:0 0 6px;font:600 24px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Sign in</h2>
+  <p style="margin:0;font-size:13.5px;color:rgba(23,22,15,.52)">Welcome back.</p>
+</div>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Email</span>
+  <input type="email" data-bind="signInEmail" value="${esc(state.signInEmail)}" placeholder="you@example.com" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">
+</label>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Password</span>
+  <input type="password" data-bind="signInPassword" value="${esc(state.signInPassword)}" placeholder="••••••••" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">
+</label>
+<button data-action="submit-signin" style="height:46px;border:0;border-radius:9px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:14.5px;cursor:pointer;letter-spacing:.01em">Sign in</button>
+<button data-action="show-signup" style="height:38px;border:0;background:none;color:#2f6d4f;font-size:12.5px;font-weight:500;cursor:pointer">New here? Create an account</button>`;
+}
+function renderSignUpForm() {
+  const squadOptions = CHALLENGE.squads.map((s) => `<option ${s === state.joinSquad ? "selected" : ""}>${esc(s)}</option>`).join("");
+  return `
+<div>
+  <h2 style="margin:0 0 6px;font:600 24px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Create an account</h2>
+  <p style="margin:0;font-size:13.5px;color:rgba(23,22,15,.52)">Just you and your friends — no company sign-on needed.</p>
+</div>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Your name</span>
+  <input data-bind="joinName" value="${esc(state.joinName)}" placeholder="Full name" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">
+</label>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Email</span>
+  <input type="email" data-bind="joinEmail" value="${esc(state.joinEmail)}" placeholder="you@example.com" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">
+</label>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Password <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">at least 8 characters</span></span>
+  <input type="password" data-bind="joinPassword" value="${esc(state.joinPassword)}" placeholder="••••••••" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">
+</label>
+<label style="display:flex;flex-direction:column;gap:7px">
+  <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Squad</span>
+  <select data-bind="joinSquad" style="height:44px;padding:0 13px;border:1px solid rgba(23,22,15,.16);border-radius:9px;background:#fff;font-size:14px;outline:none">${squadOptions}</select>
+</label>
+<button data-action="submit-signup" style="height:46px;border:0;border-radius:9px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:14.5px;cursor:pointer">Create account & enter</button>
+<button data-action="show-signin" style="height:38px;border:0;background:none;color:rgba(23,22,15,.5);font-size:12.5px;cursor:pointer">Already have an account? Sign in</button>`;
+}
+
+function currentMember() {
+  return state.members.find((m) => m.id === state.currentMemberId);
+}
+
+function renderApp() {
+  const me = currentMember();
+  if (!me) return renderLogin();
+  if (state.tab === "admin" && !me.is_admin) state.tab = "home";
+  const monday = mondayOf(todayDate());
+  const view = computeWeekView(me.id, monday);
+  const pendingCount = state.exclusions.filter((e) => e.status === "PENDING").length;
+  const flagCount = computeFlags().length;
+
+  const navDefs = [
+    { key: "home", label: "My dashboard", dot: "#7fd6a2" },
+    { key: "team", label: "Team log", dot: "#8ab4e8" },
+    { key: "exclusions", label: "Exclusions", dot: "#e8b45c", badge: state.exclusions.filter((e) => e.member_id === me.id && e.status === "PENDING").length || null },
+    ...(me.is_admin ? [{ key: "admin", label: "Admin", dot: "#c9a3e0", badge: pendingCount || null }] : []),
+  ];
+  const nav = navDefs.map((n) => `
+    <button data-action="switch-tab" data-tab="${n.key}" style="display:flex;align-items:center;gap:10px;width:100%;height:36px;padding:0 10px;border:0;border-radius:8px;cursor:pointer;font-size:13.5px;text-align:left;background:${state.tab === n.key ? "rgba(242,240,235,.12)" : "transparent"};color:${state.tab === n.key ? "#f2f0eb" : "rgba(242,240,235,.62)"};font-weight:${state.tab === n.key ? "600" : "400"}">
+      <span style="width:7px;height:7px;border-radius:50%;background:${n.dot};flex:none"></span>
+      <span>${esc(n.label)}</span>
+      ${n.badge ? `<span style="margin-left:auto;font:600 10px/1 'IBM Plex Mono',monospace;padding:3px 6px;border-radius:20px;background:#e8b45c;color:#17160f">${n.badge}</span>` : ""}
+    </button>`).join("");
+
+  const [avBg, avFg] = avatarOf(state.members.findIndex((m) => m.id === me.id));
+
+  const titles = {
+    home: [`This week · ${esc(CHALLENGE.cycleLabel)}`, `Hey ${esc(me.name.split(" ")[0])} — keep the week honest`],
+    team: ["Group attendance", "Team log"],
+    exclusions: ["Sick · travel · holidays", "Exclusions"],
+    admin: ["Challenge owner tools", "Admin"],
+  };
+
+  let body;
+  if (state.tab === "home") body = renderHome(me, view);
+  else if (state.tab === "team") body = renderTeam(me);
+  else if (state.tab === "exclusions") body = renderExclusions(me);
+  else body = renderAdmin();
+
+  return `
+<div style="min-height:100vh;display:grid;grid-template-columns:236px 1fr;background:#f2f0eb">
+  <aside style="background:${DARK};color:#f2f0eb;padding:22px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh">
+    <div style="display:flex;align-items:center;gap:9px;padding:0 8px">
+      <div style="width:24px;height:24px;border-radius:7px;background:#7fd6a2"></div>
+      <span style="font:600 14.5px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.minDays}</span>
+    </div>
+    <nav style="display:flex;flex-direction:column;gap:3px">${nav}</nav>
+    <button data-action="open-log" style="height:40px;border:0;border-radius:9px;background:#7fd6a2;color:#17160f;font-weight:600;font-size:13.5px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px">
+      <span style="font-size:16px;line-height:1">+</span> Log a session
+    </button>
+    <div style="margin-top:auto;padding:12px;border-radius:11px;background:rgba(242,240,235,.06);display:flex;flex-direction:column;gap:9px">
+      <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.42);font-weight:600">Your week</div>
+      <div style="display:flex;align-items:baseline;gap:6px;font-family:'IBM Plex Mono',monospace">
+        <span style="font-size:24px;font-weight:600">${view.doneDays}</span><span style="font-size:13px;color:rgba(242,240,235,.45)">/ ${view.effectiveNeed} days</span>
+      </div>
+      <div style="height:5px;border-radius:3px;background:rgba(242,240,235,.14);overflow:hidden"><div style="height:100%;width:${Math.min(100, Math.round((view.doneDays / Math.max(1, view.effectiveNeed)) * 100))}%;background:#7fd6a2"></div></div>
+      <div style="font-size:11.5px;color:rgba(242,240,235,.55)">${view.cleared ? "Week cleared. Anything more is bonus." : (view.effectiveNeed - view.doneDays) + " more to clear the week"}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:9px;padding:8px;border-top:1px solid rgba(242,240,235,.1)">
+      <div style="width:28px;height:28px;border-radius:50%;background:${avBg};color:${avFg};display:flex;align-items:center;justify-content:center;font:600 11px 'IBM Plex Mono',monospace">${initialsOf(me.name)}</div>
+      <div style="line-height:1.25"><div style="font-size:12.5px;font-weight:500">${esc(me.name)}</div><div style="font-size:10.5px;color:rgba(242,240,235,.42)">${esc(me.email)}</div></div>
+      <button data-action="logout" style="margin-left:auto;background:none;border:0;color:rgba(242,240,235,.4);font-size:11px;cursor:pointer">Exit</button>
+    </div>
+  </aside>
+  <main style="padding:30px 36px 56px;max-width:1180px">
+    <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:26px;flex-wrap:wrap">
+      <div>
+        <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.11em;text-transform:uppercase;color:rgba(23,22,15,.45);margin-bottom:9px">${titles[state.tab][0]}</div>
+        <h1 style="margin:0;font:600 30px/1.12 'Archivo',sans-serif;letter-spacing:-.02em">${titles[state.tab][1]}</h1>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:7px;height:36px;padding:0 12px;border-radius:8px;background:#fff;border:1px solid rgba(23,22,15,.1);font-size:12.5px;color:rgba(23,22,15,.6)">
+          <span style="width:6px;height:6px;border-radius:50%;background:#7fd6a2"></span>${fmtShort(monday)} – ${fmtShort(addDays(monday, 6))}
+        </div>
+        <button data-action="open-log" style="height:36px;padding:0 14px;border:0;border-radius:8px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:13px;cursor:pointer">Log session</button>
+      </div>
+    </header>
+    ${body}
+  </main>
+</div>
+${state.logOpen ? renderLogModal(view) : ""}`;
+}
+
+function computeFeed() {
+  const items = [];
+  for (const s of state.sessions) {
+    const m = state.members.find((mm) => mm.id === s.member_id);
+    if (!m) continue;
+    const valid = s.minutes >= CHALLENGE.minMinutes;
+    items.push({ ts: s.created_at, name: m.name, action: `logged ${s.minutes} min`, meta: `${s.type}${s.note ? " · " + s.note : ""}`, tag: valid ? "Valid" : "Short" });
+  }
+  for (const e of state.exclusions) {
+    const m = state.members.find((mm) => mm.id === e.member_id);
+    if (!m) continue;
+    items.push({ ts: e.created_at, name: m.name, action: `requested ${e.reason.toLowerCase()}`, meta: `${e.from_date}${e.to_date !== e.from_date ? " – " + e.to_date : ""}${e.note ? " · " + e.note : ""}`, tag: e.status === "APPROVED" ? "Excused" : e.status === "DECLINED" ? "Declined" : "Pending" });
+  }
+  items.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return items.slice(0, 8);
+}
+function computeFlags() {
+  const flags = [];
+  for (const s of state.sessions) {
+    const m = state.members.find((mm) => mm.id === s.member_id);
+    if (!m) continue;
+    if (s.minutes >= 100) flags.push({ name: m.name, what: `logged ${s.minutes} min — unusually long session`, when: s.session_date });
+    const created = new Date(s.created_at);
+    const logged = parseISO(s.session_date);
+    if ((created - logged) / 86400000 > 2) flags.push({ name: m.name, what: `backdated entry for ${s.session_date}`, when: isoDate(created) });
+  }
+  return flags.slice(-10).reverse();
+}
+
+function renderHome(me, view) {
+  const rank = computeRank(me.id);
+  const allMinutesThisWeek = currentWeekSnapshot().reduce((a, s) => a + s.view.totalMinutes, 0);
+  const groupMedian = state.members.length ? Math.round(allMinutesThisWeek / state.members.length) : 0;
+  const avg = view.days.filter((d) => d.mins > 0).length ? Math.round(view.totalMinutes / view.days.filter((d) => d.mins > 0).length) : 0;
+  const longest = Math.max(0, ...view.days.map((d) => d.mins));
+  const streak = computeStreak(me.id);
+
+  const kpis = [
+    { label: "Days logged", value: `${view.doneDays}/${view.effectiveNeed}`, unit: "this week", note: view.cleared ? "Week cleared. Anything more is bonus." : (view.effectiveNeed - view.doneDays) + " more to clear the week", color: view.cleared ? GREEN : DARK },
+    { label: "Minutes", value: view.totalMinutes, unit: "min", note: `Group median ${groupMedian} min`, color: DARK },
+    { label: "Streak", value: streak, unit: "weeks", note: streak ? "Keep it going" : "Clear this week to start one", color: GREEN },
+    { label: "Rank", value: "#" + rank.rank, unit: "of " + rank.of, note: "This week's standings", color: AMBER },
+  ];
+  const kpiHtml = kpis.map((k) => `
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:13px;padding:16px 17px;display:flex;flex-direction:column;gap:11px">
+      <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.45);font-weight:600">${k.label}</div>
+      <div style="display:flex;align-items:baseline;gap:6px;font-family:'IBM Plex Mono',monospace">
+        <span style="font-size:30px;font-weight:600;letter-spacing:-.02em;color:${k.color}">${k.value}</span>
+        <span style="font-size:13px;color:rgba(23,22,15,.4)">${k.unit}</span>
+      </div>
+      <div style="font-size:12px;color:rgba(23,22,15,.5)">${esc(k.note)}</div>
+    </div>`).join("");
+
+  const weekHtml = view.days.map((d) => `
+    <div style="display:flex;flex-direction:column;gap:7px;align-items:center">
+      <div style="font-size:11px;font-weight:600;color:rgba(23,22,15,.4);letter-spacing:.06em">${d.dow}</div>
+      <div style="width:100%;height:96px;border-radius:10px;border:1px solid ${d.border};background:${d.bg};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px">
+        <span style="font:600 15px 'IBM Plex Mono',monospace;color:${d.fg}">${d.big}</span>
+        <span style="font-size:10px;color:${d.sub}">${d.small}</span>
+      </div>
+    </div>`).join("");
+
+  const snap = currentWeekSnapshot();
+  const cleared5 = snap.filter((s) => s.view.cleared).length;
+  const onExclusion = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount > 0).length;
+  const behind = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount === 0 && (s.view.effectiveNeed - s.view.doneDays) >= 2).length;
+  const onPace = Math.max(0, snap.length - cleared5 - onExclusion - behind);
+  const pct = snap.length ? Math.round((cleared5 / snap.length) * 100) : 0;
+  const pulseBars = [
+    { label: `Cleared ${view.effectiveNeed} days`, value: cleared5, color: "#7fd6a2" },
+    { label: "On pace, 1 short", value: onPace, color: PALE },
+    { label: "Behind pace", value: behind, color: AMBER },
+    { label: "On exclusion", value: onExclusion, color: "rgba(242,240,235,.3)" },
+  ].map((b) => ({ ...b, pct: snap.length ? Math.round((b.value / snap.length) * 100) + "%" : "0%" }));
+
+  const nudges = snap.filter((s) => !s.view.cleared && s.view.personalExcusedCount === 0).slice(0, 3).map((s) => s.member.name.split(" ")[0]);
+
+  const feed = computeFeed();
+  const feedHtml = feed.map((f, i) => {
+    const [bg, fg] = avatarOf(i);
+    const tagColors = f.tag === "Short" ? ["#eceae4", "rgba(23,22,15,.5)"] : f.tag === "Excused" ? ["rgba(232,180,92,.18)", "#8a6420"] : f.tag === "Declined" ? ["#eceae4", "rgba(23,22,15,.4)"] : f.tag === "Pending" ? ["rgba(232,180,92,.18)", "#8a6420"] : ["#e4ece6", GREEN];
+    return `
+    <div style="display:flex;align-items:center;gap:13px;padding:11px 0;border-top:1px solid rgba(23,22,15,.07)">
+      <div style="width:32px;height:32px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 11px 'IBM Plex Mono',monospace;flex:none">${initialsOf(f.name)}</div>
+      <div style="min-width:0">
+        <div style="font-size:13.5px;font-weight:500">${esc(f.name)} <span style="font-weight:400;color:rgba(23,22,15,.55)">${esc(f.action)}</span></div>
+        <div style="font-size:11.5px;color:rgba(23,22,15,.42);font-family:'IBM Plex Mono',monospace;margin-top:2px">${esc(f.meta)}</div>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <span style="font:500 11px 'IBM Plex Mono',monospace;padding:4px 8px;border-radius:20px;background:${tagColors[0]};color:${tagColors[1]}">${f.tag}</span>
+        <span style="font-size:11.5px;color:rgba(23,22,15,.35)">${timeAgo(f.ts)}</span>
+      </div>
+    </div>`;
+  }).join("") || `<div style="padding:20px 0;color:rgba(23,22,15,.4);font-size:13px">Nobody's logged anything yet. Be first.</div>`;
+
+  return `
+<div style="display:flex;flex-direction:column;gap:20px">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">${kpiHtml}</div>
+  <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px">
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:18px">
+        <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Your week</h3>
+        <span style="font-size:12px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace">${view.totalMinutes} min total</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:9px">${weekHtml}</div>
+      <div style="margin-top:16px;padding-top:15px;border-top:1px solid rgba(23,22,15,.08);display:flex;gap:20px;font-size:12px;color:rgba(23,22,15,.5)">
+        <span>Streak <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${streak} weeks</strong></span>
+        <span>Avg session <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avg} min</strong></span>
+        <span>Longest <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${longest} min</strong></span>
+      </div>
+    </div>
+    <div style="background:${DARK};color:#f2f0eb;border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
+      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Team pulse</h3>
+      <div>
+        <div style="display:flex;align-items:baseline;gap:7px;font-family:'IBM Plex Mono',monospace">
+          <span style="font-size:38px;font-weight:600;letter-spacing:-.03em;color:#7fd6a2">${pct}%</span>
+          <span style="font-size:14px;color:rgba(242,240,235,.5)">on track</span>
+        </div>
+        <div style="font-size:12.5px;color:rgba(242,240,235,.55);margin-top:6px">${cleared5} of ${snap.length} teammates have cleared ${view.effectiveNeed}×${CHALLENGE.minMinutes} this week.</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:9px">
+        ${pulseBars.map((b) => `
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:rgba(242,240,235,.7)">${b.label}</span><span style="font-family:'IBM Plex Mono',monospace;color:rgba(242,240,235,.5)">${b.value}</span></div>
+          <div style="height:6px;border-radius:3px;background:rgba(242,240,235,.12);overflow:hidden"><div style="height:100%;width:${b.pct};background:${b.color}"></div></div>
+        </div>`).join("")}
+      </div>
+      ${nudges.length ? `<div style="margin-top:auto;padding:12px 13px;border-radius:10px;background:rgba(232,180,92,.14);border:1px solid rgba(232,180,92,.3)">
+        <div style="font-size:12px;font-weight:600;color:#e8b45c;margin-bottom:4px">Nudge queue · ${nudges.length}</div>
+        <div style="font-size:12px;color:rgba(242,240,235,.6);line-height:1.5">${esc(nudges.join(", "))} ${nudges.length > 1 ? "are" : "is"} behind pace.</div>
+      </div>` : ""}
+    </div>
+  </div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
+      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Latest from the floor</h3>
+      <button data-action="switch-tab" data-tab="team" style="background:none;border:0;font-size:12.5px;color:#2f6d4f;cursor:pointer;font-weight:500">See full log →</button>
+    </div>
+    <div style="display:flex;flex-direction:column">${feedHtml}</div>
+  </div>
+</div>`;
+}
+
+function renderTeam(me) {
+  const { from, to, label } = rangeToDates();
+  const dates = dateList(from, to);
+  const showDayGrid = dates.length <= 7;
+  const min = CHALLENGE.minMinutes;
+  const members = filteredMembers();
+
+  const ranges = ["This week", "Last week", "Month to date", "Full cycle", "Custom"].map((r) => `
+    <button data-action="set-range" data-range="${r}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.range === r ? "600" : "400"};border:1px solid ${state.range === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.range === r ? "#17160f" : "#fff"};color:${state.range === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${r}</button>`).join("");
+  const squadOptions = ["All squads", ...CHALLENGE.squads].map((s) => `<option ${s === state.squadFilter ? "selected" : ""}>${esc(s)}</option>`).join("");
+
+  const rows = members.map((m, i) => {
+    const [bg, fg] = avatarOf(i);
+    const dm = dailyMinutesMap(m.id);
+    const st = rowStatus(m.id, from, to);
+    let dayCells = "";
+    if (showDayGrid) {
+      dayCells = dates.map((d) => {
+        const iso = isoDate(d);
+        const mins = dm[iso] || 0;
+        const excused = isExcludedDay(m.id, iso);
+        const dowLabel = DOWS[(d.getDay() + 6) % 7];
+        if (excused) return `<div title="${fmtShort(d)} — excused" style="height:34px;border-radius:7px;background:rgba(232,180,92,.2);color:#8a6420;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">EX</div>`;
+        if (mins >= min) return `<div title="${fmtShort(d)} — ${mins} min" style="height:34px;border-radius:7px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
+        if (mins > 0) return `<div title="${fmtShort(d)} — ${mins} min (under ${min})" style="height:34px;border-radius:7px;background:${PALE};color:#1e4633;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
+        const weekend = dowLabel === "SAT" || dowLabel === "SUN";
+        return `<div title="${fmtShort(d)} — no session" style="height:34px;border-radius:7px;background:${weekend ? "#f5f4f0" : "#eceae4"}"></div>`;
+      }).join("");
+    }
+    return `
+    <div style="display:grid;grid-template-columns:210px ${showDayGrid ? "repeat(" + dates.length + ",1fr)" : "1fr"} 96px 74px;gap:6px;align-items:center;padding:5px 0;border-top:1px solid rgba(23,22,15,.06)">
+      <div style="display:flex;align-items:center;gap:10px;min-width:0">
+        <div style="width:28px;height:28px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 10.5px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
+        <div style="min-width:0"><div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.name)}${m.id === me.id ? " (you)" : ""}</div><div style="font-size:10.5px;color:rgba(23,22,15,.4)">${esc(m.squad)}</div></div>
+      </div>
+      ${showDayGrid ? dayCells : `<div style="font-size:12px;color:rgba(23,22,15,.45)">${st.cleared} days cleared · ${st.excused} excused</div>`}
+      <div style="text-align:right;font:600 12.5px 'IBM Plex Mono',monospace">${st.total}</div>
+      <div style="text-align:right"><span style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:4px 7px;border-radius:20px;background:${st.status === "CLEAR" ? "#e4ece6" : st.status === "CLOSE" ? "rgba(232,180,92,.18)" : "#eceae4"};color:${st.status === "CLEAR" ? GREEN : st.status === "CLOSE" ? "#8a6420" : "rgba(23,22,15,.5)"}">${st.status}</span></div>
+    </div>`;
+  }).join("");
+
+  const dowHeadsHtml = showDayGrid ? dates.map((d) => {
+    const dow = DOWS[(d.getDay() + 6) % 7];
+    return `<div style="text-align:center;font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:${dow === "SAT" || dow === "SUN" ? "rgba(23,22,15,.28)" : "rgba(23,22,15,.45)"}">${dow} ${d.getDate()}</div>`;
+  }).join("") : `<div style="font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:rgba(23,22,15,.4)">SUMMARY</div>`;
+
+  // minutes by day chart (aggregate across range, bucketed by weekday)
+  const barTotals = [0, 0, 0, 0, 0, 0, 0];
+  for (const m of members) {
+    const dm = dailyMinutesMap(m.id);
+    for (const d of dates) {
+      const idx = (d.getDay() + 6) % 7;
+      barTotals[idx] += dm[isoDate(d)] || 0;
+    }
+  }
+  const maxBar = Math.max(1, ...barTotals);
+  const dayBars = barTotals.map((v, i) => `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
+      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${v}</span>
+      <div style="width:100%;height:${Math.round((v / maxBar) * 100)}%;border-radius:7px 7px 3px 3px;background:${i > 4 ? "#d7dcd3" : "#a8d4bb"}"></div>
+      <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${DOWS[i]}</span>
+    </div>`).join("");
+
+  const squadStats = CHALLENGE.squads.map((sq) => {
+    const squadMembers = state.members.filter((m) => m.squad === sq);
+    const monday = mondayOf(todayDate());
+    const snaps = squadMembers.map((m) => computeWeekView(m.id, monday));
+    const clearedPct = squadMembers.length ? Math.round((snaps.filter((v) => v.cleared).length / squadMembers.length) * 100) : 0;
+    const mins = squadMembers.reduce((a, m) => a + Object.values(dailyMinutesMap(m.id)).reduce((x, y) => x + y, 0), 0);
+    return { name: sq, pct: clearedPct, mins };
+  }).sort((a, b) => b.pct - a.pct);
+  const squadsHtml = squadStats.map((s, i) => `
+    <div style="display:flex;align-items:center;gap:12px">
+      <div style="width:22px;font:600 13px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.35)">${i + 1}</div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span style="font-weight:500">${esc(s.name)}</span><span style="font-family:'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${s.pct}%</span></div>
+        <div style="height:8px;border-radius:4px;background:#eceae4;overflow:hidden"><div style="height:100%;width:${s.pct}%;background:${i === 0 ? GREEN : i === 1 ? PALE : AMBER}"></div></div>
+      </div>
+      <div style="font:500 11px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.4);width:72px;text-align:right">${s.mins} min</div>
+    </div>`).join("");
+
+  return `
+<div style="display:flex;flex-direction:column;gap:18px">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:12px;padding:12px 14px">
+    ${ranges}
+    <div style="display:flex;align-items:center;gap:7px;margin-left:auto;flex-wrap:wrap">
+      ${state.range === "Custom" ? `
+      <input type="date" data-bind="customFrom" value="${esc(state.customFrom)}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <span style="color:rgba(23,22,15,.35);font-size:12px">to</span>
+      <input type="date" data-bind="customTo" value="${esc(state.customTo)}" style="height:32px;padding:0 9px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <button data-action="apply-custom-range" style="height:32px;padding:0 10px;border:0;border-radius:7px;background:#17160f;color:#fff;font-size:12px;cursor:pointer">Apply</button>` : ""}
+      <select data-bind="squadFilter" style="height:32px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-size:12.5px">${squadOptions}</select>
+      <button data-action="export-csv" style="height:32px;padding:0 12px;border:1px solid rgba(23,22,15,.16);border-radius:7px;background:#fff;font-size:12.5px;cursor:pointer">Export CSV</button>
+    </div>
+  </div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px;overflow:auto">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Who went, when, how long</h3>
+        <p style="margin:0;font-size:12.5px;color:rgba(23,22,15,.45)">Minutes per day · ${esc(label)} (${fmtShort(from)} – ${fmtShort(to)})</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;font-size:11px;color:rgba(23,22,15,.45)">
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${GREEN}"></span>${min}+ min</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${PALE}"></span>short</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${AMBER}"></span>excused</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:#eceae4"></span>missed</span>
+      </div>
+    </div>
+    <div style="min-width:${showDayGrid ? "820px" : "560px"};display:flex;flex-direction:column;gap:6px">
+      <div style="display:grid;grid-template-columns:210px ${showDayGrid ? "repeat(" + dates.length + ",1fr)" : "1fr"} 96px 74px;gap:6px;align-items:center;padding:0 0 6px">
+        <div></div>${dowHeadsHtml}
+        <div style="text-align:right;font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:rgba(23,22,15,.4)">MINUTES</div>
+        <div style="text-align:right;font:600 10.5px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:rgba(23,22,15,.4)">STATUS</div>
+      </div>
+      ${rows || `<div style="padding:20px 0;color:rgba(23,22,15,.4);font-size:13px">No members in this squad.</div>`}
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+      <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Minutes by day</h3>
+      <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.45)">Whole group · ${esc(label)}</p>
+      <div style="display:flex;align-items:flex-end;gap:12px;height:150px">${dayBars}</div>
+    </div>
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+      <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Squad standings</h3>
+      <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members hitting ${CHALLENGE.minDays}×${CHALLENGE.minMinutes} this week</p>
+      <div style="display:flex;flex-direction:column;gap:12px">${squadsHtml}</div>
+    </div>
+  </div>
+</div>`;
+}
+
+function renderExclusions(me) {
+  const reasons = CHALLENGE.exclusionReasons.map((r) => `
+    <button data-action="set-reason" data-reason="${esc(r)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.reason === r ? "600" : "400"};border:1px solid ${state.reason === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.reason === r ? "#17160f" : "#fff"};color:${state.reason === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${esc(r)}</button>`).join("");
+
+  const myExc = state.exclusions.filter((e) => e.member_id === me.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const myExcHtml = myExc.map((e) => {
+    const colors = e.status === "APPROVED" ? ["#e4ece6", GREEN, GREEN] : e.status === "DECLINED" ? ["#eceae4", "rgba(23,22,15,.5)", "rgba(23,22,15,.3)"] : ["rgba(232,180,92,.18)", "#8a6420", AMBER];
+    const days = Math.round((parseISO(e.to_date) - parseISO(e.from_date)) / 86400000) + 1;
+    return `
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid rgba(23,22,15,.07)">
+      <span style="width:8px;height:8px;border-radius:50%;background:${colors[2]};flex:none"></span>
+      <div><div style="font-size:13.5px;font-weight:500">${esc(e.reason)}</div><div style="font-size:11.5px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace;margin-top:2px">${e.from_date}${e.to_date !== e.from_date ? " – " + e.to_date : ""} · ${days} day${days > 1 ? "s" : ""}</div></div>
+      <span style="margin-left:auto;font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:4px 8px;border-radius:20px;background:${colors[0]};color:${colors[1]}">${e.status}</span>
+      ${e.status === "PENDING" ? `<button data-action="remove-exclusion" data-id="${e.id}" style="background:none;border:0;color:rgba(23,22,15,.35);font-size:11px;cursor:pointer;margin-left:8px">Cancel</button>` : ""}
+    </div>`;
+  }).join("") || `<div style="padding:14px 0;color:rgba(23,22,15,.4);font-size:13px">No exclusion requests yet.</div>`;
+
+  const holidaysHtml = [...state.holidays].sort((a, b) => a.holiday_date.localeCompare(b.holiday_date)).map((h) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px">
+      <span style="font-family:'IBM Plex Mono',monospace;color:rgba(23,22,15,.5);width:96px">${fmtShort(parseISO(h.holiday_date))}</span>
+      <span>${esc(h.name)}</span>
+      <span style="margin-left:auto;font-size:11.5px;color:rgba(23,22,15,.38)">${esc(h.tag)}</span>
+    </div>`).join("");
+
+  return `
+<div style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px;align-items:start">
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:22px">
+    <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Request an exclusion</h3>
+    <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${CHALLENGE.minDays}. Public holidays are auto-excluded for everyone.</p>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:8px">Reason</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${reasons}</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">From</span><input type="date" data-bind="excFrom" value="${esc(state.excFrom)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px"></label>
+        <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">To</span><input type="date" data-bind="excTo" value="${esc(state.excTo)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px"></label>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Note to the group</span><textarea data-bind="excNote" rows="3" placeholder="Client visit in Pune — back Friday." style="padding:10px 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px;resize:vertical">${esc(state.excNote)}</textarea></label>
+      <button data-action="submit-exclusion" style="height:42px;border:0;border-radius:9px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:13.5px;cursor:pointer">Submit for approval</button>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+      <h3 style="margin:0 0 14px;font:600 15px/1 'Archivo',sans-serif">Your exclusions this cycle</h3>
+      <div style="display:flex;flex-direction:column">${myExcHtml}</div>
+    </div>
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+      <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Auto-excluded dates</h3>
+      <p style="margin:0 0 14px;font-size:12.5px;color:rgba(23,22,15,.45)">Nobody needs to log on these.</p>
+      <div style="display:flex;flex-direction:column">${holidaysHtml}</div>
+    </div>
+  </div>
+</div>`;
+}
+
+function renderAdmin() {
+  const monday = mondayOf(todayDate());
+  const snap = currentWeekSnapshot();
+  const compliance = snap.length ? Math.round((snap.filter((s) => s.view.cleared).length / snap.length) * 100) : 0;
+  const pending = state.exclusions.filter((e) => e.status === "PENDING").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const totalMinutes = state.sessions.reduce((a, s) => a + s.minutes, 0);
+
+  const adminStats = [
+    { label: "Group compliance", value: compliance + "%", note: "This week, " + snap.length + " members", color: GREEN },
+    { label: "Pending approvals", value: pending.length, note: pending.length ? "Oldest waiting " + Math.max(0, Math.floor((Date.now() - new Date(pending[0].created_at)) / 86400000)) + " days" : "All caught up", color: AMBER },
+    { label: "Total minutes", value: totalMinutes.toLocaleString(), note: "Cycle to date, " + state.members.length + " members", color: DARK },
+  ];
+  const statsHtml = adminStats.map((a) => `
+    <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:13px;padding:16px 18px">
+      <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.45);font-weight:600;margin-bottom:10px">${a.label}</div>
+      <div style="font:600 28px 'IBM Plex Mono',monospace;letter-spacing:-.02em;color:${a.color}">${a.value}</div>
+      <div style="font-size:12px;color:rgba(23,22,15,.5);margin-top:8px">${esc(a.note)}</div>
+    </div>`).join("");
+
+  const pendingHtml = pending.map((p, i) => {
+    const m = state.members.find((mm) => mm.id === p.member_id);
+    const [bg, fg] = avatarOf(i + 2);
+    return `
+    <div style="display:flex;align-items:center;gap:13px;padding:12px 0;border-top:1px solid rgba(23,22,15,.07)">
+      <div style="width:30px;height:30px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 11px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m ? m.name : "??")}</div>
+      <div><div style="font-size:13.5px;font-weight:500">${esc(m ? m.name : p.member_id)} · <span style="font-weight:400;color:rgba(23,22,15,.55)">${esc(p.reason)}</span></div><div style="font-size:11.5px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace;margin-top:2px">${p.from_date}${p.to_date !== p.from_date ? " – " + p.to_date : ""}${p.note ? " · " + esc(p.note) : ""}</div></div>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button data-action="decline-exclusion" data-id="${p.id}" style="height:32px;padding:0 12px;border:1px solid rgba(23,22,15,.16);border-radius:7px;background:#fff;font-size:12.5px;cursor:pointer">Decline</button>
+        <button data-action="approve-exclusion" data-id="${p.id}" style="height:32px;padding:0 12px;border:0;border-radius:7px;background:#2f6d4f;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer">Approve</button>
+      </div>
+    </div>`;
+  }).join("") || `<div style="padding:14px 0;color:rgba(23,22,15,.4);font-size:13px">Nothing pending.</div>`;
+
+  const flags = computeFlags();
+  const flagsHtml = flags.map((f) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px">
+      <span style="width:8px;height:8px;border-radius:50%;background:${AMBER};flex:none"></span>
+      <span style="font-weight:500">${esc(f.name)}</span>
+      <span style="color:rgba(23,22,15,.55)">${esc(f.what)}</span>
+      <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:rgba(23,22,15,.4)">${f.when}</span>
+    </div>`).join("") || `<div style="padding:14px 0;color:rgba(23,22,15,.4);font-size:13px">No flags right now.</div>`;
+
+  const membersHtml = state.members.map((m, i) => {
+    const [bg, fg] = avatarOf(i);
+    const total = state.sessions.filter((s) => s.member_id === m.id).length;
+    return `
+    <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(23,22,15,.07);font-size:13px">
+      <div style="width:26px;height:26px;border-radius:50%;background:${bg};color:${fg};display:flex;align-items:center;justify-content:center;font:600 10px 'IBM Plex Mono',monospace;flex:none">${initialsOf(m.name)}</div>
+      <span style="font-weight:500">${esc(m.name)}</span>
+      <span style="color:rgba(23,22,15,.45);font-size:11.5px">${esc(m.email)}</span>
+      <span style="color:rgba(23,22,15,.4)">${esc(m.squad)}</span>
+      <span style="color:rgba(23,22,15,.4)">${total} sessions</span>
+      ${m.is_admin ? `<span style="font:600 10px 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:20px;background:#efe4f2;color:#7a4a8a">ADMIN</span>` : ""}
+      <button data-action="toggle-admin" data-id="${esc(m.id)}" style="margin-left:auto;background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:28px;padding:0 10px;font-size:11.5px;cursor:pointer">${m.is_admin ? "Remove admin" : "Make admin"}</button>
+    </div>`;
+  }).join("");
+
+  return `
+<div style="display:flex;flex-direction:column;gap:16px">
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">${statsHtml}</div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <h3 style="margin:0 0 14px;font:600 15px/1 'Archivo',sans-serif">Pending approvals</h3>
+    <div style="display:flex;flex-direction:column">${pendingHtml}</div>
+  </div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
+      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Flagged entries</h3>
+      <span style="font-size:12px;color:rgba(23,22,15,.45)">Auto-flagged: unusual duration or backdated log</span>
+    </div>
+    <div style="display:flex;flex-direction:column">${flagsHtml}</div>
+  </div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+      <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Members · ${state.members.length}</h3>
+      ${db.DEMO_MODE ? `<button data-action="reset-demo" style="background:none;border:1px solid rgba(23,22,15,.16);border-radius:7px;height:30px;padding:0 12px;font-size:12px;cursor:pointer">Reset demo data</button>` : ""}
+    </div>
+    <div style="display:flex;flex-direction:column">${membersHtml}</div>
+  </div>
+</div>`;
+}
+
+function renderLogModal(view) {
+  const min = CHALLENGE.minMinutes;
+  const durColor = state.dur >= min ? GREEN : AMBER;
+  const presets = [30, 45, 60, 90].map((d) => `
+    <button data-action="set-dur-preset" data-dur="${d}" style="flex:1;height:32px;border-radius:8px;cursor:pointer;font-size:12.5px;font-family:'IBM Plex Mono',monospace;font-weight:${state.dur === d ? "600" : "400"};border:1px solid ${state.dur === d ? "transparent" : "rgba(23,22,15,.14)"};background:${state.dur === d ? "#17160f" : "#fff"};color:${state.dur === d ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${d} min</button>`).join("");
+  const types = CHALLENGE.sessionTypes.map((t) => `
+    <button data-action="set-type" data-type="${esc(t)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.type === t ? "600" : "400"};border:1px solid ${state.type === t ? "transparent" : "rgba(23,22,15,.15)"};background:${state.type === t ? GREEN : "#fff"};color:${state.type === t ? "#fff" : "rgba(23,22,15,.7)"}">${esc(t)}</button>`).join("");
+  const nextDay = Math.min(view.effectiveNeed, view.doneDays + 1);
+
+  return `
+<div data-action="close-log" style="position:fixed;inset:0;background:rgba(23,22,15,.5);display:flex;align-items:center;justify-content:center;padding:30px;z-index:40">
+  <div data-action="stop" style="width:100%;max-width:452px;background:#f7f6f2;border-radius:16px;padding:24px 26px 26px;animation:fadeUp .18s ease both;box-shadow:0 24px 60px rgba(23,22,15,.3)">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px">
+      <div>
+        <h3 style="margin:0 0 4px;font:600 20px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Log today's session</h3>
+        <p style="margin:0;font-size:12.5px;color:rgba(23,22,15,.5);font-family:'IBM Plex Mono',monospace">${todayDate().toLocaleDateString("en-US", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</p>
+      </div>
+      <button data-action="close-log" style="width:30px;height:30px;border:0;border-radius:8px;background:rgba(23,22,15,.06);cursor:pointer;font-size:15px;color:rgba(23,22,15,.5)">×</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">Duration</div>
+        <div style="background:#fff;border:1px solid rgba(23,22,15,.1);border-radius:12px;padding:16px 18px">
+          <div style="display:flex;align-items:baseline;gap:7px;margin-bottom:12px;font-family:'IBM Plex Mono',monospace">
+            <span id="logDurValue" style="font-size:38px;font-weight:600;letter-spacing:-.03em;color:${durColor}">${state.dur}</span>
+            <span style="font-size:14px;color:rgba(23,22,15,.45)">minutes</span>
+            <span id="logDurVerdict" style="margin-left:auto;font-size:11.5px;font-weight:500;color:${durColor}">${state.dur >= min ? "counts as a valid day" : "under " + min + " min — won't count"}</span>
+          </div>
+          <input id="logDurSlider" type="range" min="10" max="120" step="5" value="${state.dur}" style="width:100%;accent-color:#2f6d4f">
+          <div style="display:flex;gap:7px;margin-top:12px">${presets}</div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">What did you do</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">${types}</div>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Note <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">optional, visible to all</span></span>
+        <input data-bind="note" value="${esc(state.note)}" placeholder="Leg day. Regret everything." style="height:40px;padding:0 12px;border:1px solid rgba(23,22,15,.14);border-radius:9px;background:#fff;font-size:13.5px;outline:none">
+      </label>
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;background:rgba(47,109,79,.08)">
+        <span style="width:8px;height:8px;border-radius:50%;background:#2f6d4f"></span>
+        <span style="font-size:12.5px;color:rgba(23,22,15,.65)">This will be day <strong>${nextDay}</strong> of ${view.effectiveNeed} this week.</span>
+      </div>
+      <div style="display:flex;gap:9px">
+        <button data-action="close-log" style="flex:none;height:44px;padding:0 16px;border:1px solid rgba(23,22,15,.16);border-radius:10px;background:#fff;font-size:13.5px;cursor:pointer">Cancel</button>
+        <button data-action="submit-log" style="flex:1;height:44px;border:0;border-radius:10px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:14px;cursor:pointer">Mark attendance</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// CSV export
+// ---------------------------------------------------------------------------
+function exportCsv() {
+  const { from, to, label } = rangeToDates();
+  const dates = dateList(from, to);
+  const members = filteredMembers();
+  const rows = [["Name", "Squad", "Date", "Minutes", "Type", "Note", "Status"]];
+  for (const m of members) {
+    const dm = dailyMinutesMap(m.id);
+    for (const d of dates) {
+      const iso = isoDate(d);
+      const mins = dm[iso] || 0;
+      const excused = isExcludedDay(m.id, iso);
+      const daySessions = state.sessions.filter((s) => s.member_id === m.id && s.session_date === iso);
+      if (mins === 0 && !excused) continue;
+      const types = daySessions.map((s) => s.type).join("/") || "";
+      const notes = daySessions.map((s) => s.note).filter(Boolean).join(" | ");
+      const status = excused ? "EXCUSED" : mins >= CHALLENGE.minMinutes ? "VALID" : "SHORT";
+      rows.push([m.name, m.squad, iso, mins, types, notes, status]);
+    }
+  }
+  const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `45x5-team-log-${label.replace(/\s+/g, "-").toLowerCase()}-${isoDate(todayDate())}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------------------
+// event wiring
+// ---------------------------------------------------------------------------
+async function withErrorHandling(fn) {
+  try {
+    await fn();
+  } catch (e) {
+    state.error = e.message || String(e);
+    render();
+  }
+}
+
+root.addEventListener("click", async (ev) => {
+  const el = ev.target.closest("[data-action]");
+  if (!el) return;
+  const action = el.dataset.action;
+
+  if (action === "stop") {
+    ev.stopPropagation();
+    return;
+  }
+  if (action === "close-log") {
+    state.logOpen = false;
+    render();
+    return;
+  }
+  if (action === "open-log") {
+    state.dur = CHALLENGE.minMinutes;
+    state.type = CHALLENGE.sessionTypes[0];
+    state.note = "";
+    state.logOpen = true;
+    render();
+    return;
+  }
+  if (action === "switch-tab") {
+    state.tab = el.dataset.tab;
+    render();
+    return;
+  }
+  if (action === "set-dur-preset") {
+    state.dur = Number(el.dataset.dur);
+    render();
+    return;
+  }
+  if (action === "set-type") {
+    state.type = el.dataset.type;
+    render();
+    return;
+  }
+  if (action === "set-range") {
+    state.range = el.dataset.range;
+    render();
+    return;
+  }
+  if (action === "apply-custom-range") {
+    render();
+    return;
+  }
+  if (action === "set-reason") {
+    state.reason = el.dataset.reason;
+    render();
+    return;
+  }
+  if (action === "show-signup") {
+    state.authView = "signup";
+    state.error = "";
+    state.info = "";
+    render();
+    return;
+  }
+  if (action === "show-signin") {
+    state.authView = "signin";
+    state.error = "";
+    state.info = "";
+    render();
+    return;
+  }
+  if (action === "logout") {
+    await withErrorHandling(async () => {
+      await db.signOut();
+      state.currentMemberId = "";
+      state.screen = "login";
+      state.tab = "home";
+      state.authView = "signin";
+      state.signInPassword = "";
+      render();
+    });
+    return;
+  }
+
+  if (action === "submit-signin") {
+    const email = state.signInEmail.trim();
+    if (!email || !state.signInPassword) {
+      state.error = "Enter your email and password.";
+      render();
+      return;
+    }
+    await withErrorHandling(async () => {
+      const member = await db.signIn({ email, password: state.signInPassword });
+      state.error = "";
+      state.info = "";
+      state.signInPassword = "";
+      state.currentMemberId = member.id;
+      state.screen = "app";
+      state.tab = "home";
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "submit-signup") {
+    if (!state.joinName.trim() || !state.joinEmail.trim()) {
+      state.error = "Enter your name and email.";
+      render();
+      return;
+    }
+    if (state.joinPassword.length < 8) {
+      state.error = "Password must be at least 8 characters.";
+      render();
+      return;
+    }
+    await withErrorHandling(async () => {
+      const { member, needsConfirmation } = await db.signUp({
+        name: state.joinName, email: state.joinEmail, password: state.joinPassword, squad: state.joinSquad,
+      });
+      state.error = "";
+      state.joinPassword = "";
+      if (needsConfirmation) {
+        state.info = "Account created — check your email to confirm it, then sign in.";
+        state.authView = "signin";
+        state.signInEmail = state.joinEmail;
+      } else {
+        state.info = "";
+        state.currentMemberId = member.id;
+        state.screen = "app";
+        state.tab = "home";
+        await loadAll();
+      }
+      render();
+    });
+    return;
+  }
+  if (action === "submit-log") {
+    await withErrorHandling(async () => {
+      await db.logSession({ memberId: state.currentMemberId, date: isoDate(todayDate()), minutes: state.dur, type: state.type, note: state.note.trim() });
+      state.logOpen = false;
+      state.note = "";
+      state.tab = "home";
+      state.error = "";
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "submit-exclusion") {
+    if (!state.excFrom || !state.excTo) {
+      state.error = "Pick a from and to date.";
+      render();
+      return;
+    }
+    await withErrorHandling(async () => {
+      await db.requestExclusion({ memberId: state.currentMemberId, reason: state.reason, from: state.excFrom, to: state.excTo, note: state.excNote.trim() });
+      state.excFrom = "";
+      state.excTo = "";
+      state.excNote = "";
+      state.error = "";
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "remove-exclusion") {
+    await withErrorHandling(async () => {
+      await db.removeExclusion(el.dataset.id);
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "approve-exclusion" || action === "decline-exclusion") {
+    await withErrorHandling(async () => {
+      await db.setExclusionStatus(el.dataset.id, action === "approve-exclusion" ? "APPROVED" : "DECLINED");
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "toggle-admin") {
+    await withErrorHandling(async () => {
+      const m = state.members.find((mm) => mm.id === el.dataset.id);
+      await db.setMemberAdmin(el.dataset.id, !m.is_admin);
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "reset-demo") {
+    if (!confirm("Reset all demo data back to the seeded sample? This can't be undone.")) return;
+    await withErrorHandling(async () => {
+      await db.resetDemoData();
+      state.currentMemberId = "";
+      state.screen = "login";
+      state.tab = "home";
+      await loadAll();
+      render();
+    });
+    return;
+  }
+  if (action === "export-csv") {
+    exportCsv();
+    return;
+  }
+});
+
+root.addEventListener("input", (ev) => {
+  const el = ev.target;
+  if (el.id === "logDurSlider") {
+    state.dur = Number(el.value);
+    const min = CHALLENGE.minMinutes;
+    const durColor = state.dur >= min ? GREEN : AMBER;
+    const valueEl = document.getElementById("logDurValue");
+    const verdictEl = document.getElementById("logDurVerdict");
+    if (valueEl) { valueEl.textContent = state.dur; valueEl.style.color = durColor; }
+    if (verdictEl) { verdictEl.textContent = state.dur >= min ? "counts as a valid day" : "under " + min + " min — won't count"; verdictEl.style.color = durColor; }
+    root.querySelectorAll("[data-action='set-dur-preset']").forEach((btn) => {
+      const active = Number(btn.dataset.dur) === state.dur;
+      btn.style.fontWeight = active ? "600" : "400";
+      btn.style.border = active ? "1px solid transparent" : "1px solid rgba(23,22,15,.14)";
+      btn.style.background = active ? "#17160f" : "#fff";
+      btn.style.color = active ? "#f7f6f2" : "rgba(23,22,15,.7)";
+    });
+    return;
+  }
+  const bind = el.dataset.bind;
+  if (bind) state[bind] = el.value;
+});
+root.addEventListener("change", (ev) => {
+  const el = ev.target;
+  const bind = el.dataset.bind;
+  if (!bind) return;
+  state[bind] = el.value;
+  if (bind === "squadFilter" || bind === "joinSquad") render();
+});
+
+boot();
