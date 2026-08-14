@@ -408,15 +408,15 @@ function renderLogin() {
   const info = state.info ? `<div style="margin-bottom:14px;padding:10px 13px;border-radius:9px;background:rgba(47,109,79,.1);color:${GREEN};font-size:12.5px">${esc(state.info)}</div>` : "";
   const demoHint = db.DEMO_MODE ? `<p style="margin:0;font-size:11.5px;color:rgba(23,22,15,.4);font-family:'IBM Plex Mono',monospace">Local demo — try riya@example.com / password123 (admin), or sign up your own.</p>` : "";
   return `
-<div style="min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:#f2f0eb">
-  <div style="padding:48px 56px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb;overflow:hidden">
+<div class="login-shell" style="min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:#f2f0eb">
+  <div class="login-hero" style="padding:48px 56px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb;overflow:hidden">
     <div style="display:flex;align-items:center;gap:10px">
       <div style="width:26px;height:26px;border-radius:7px;background:#7fd6a2"></div>
       <span style="font:600 15px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin:auto 0">
-      ${heroIllustration()}
-      <h1 style="margin:8px 0 0;font:600 44px/1.08 'Archivo',sans-serif;letter-spacing:-.02em">Show up.<br>Together.</h1>
+    <div class="login-hero-content" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin:auto 0">
+      <div class="hero-illustration">${heroIllustration()}</div>
+      <h1 class="hero-title" style="margin:8px 0 0;font:600 44px/1.08 'Archivo',sans-serif;letter-spacing:-.02em">Show up.<br>Together.</h1>
       <p style="margin:0;max-width:400px;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group workout challenge — log it, track it, and win it together.</p>
     </div>
   </div>
@@ -514,9 +514,16 @@ function renderApp() {
   else if (state.tab === "exclusions") body = renderExclusions(me);
   else body = renderAdmin();
 
+  const mobileNav = navDefs.map((n) => `
+    <button data-action="switch-tab" data-tab="${n.key}" style="display:flex;flex-direction:column;align-items:center;gap:3px;background:none;border:0;padding:6px 10px;cursor:pointer;color:${state.tab === n.key ? "#f2f0eb" : "rgba(242,240,235,.5)"};position:relative">
+      <span style="width:8px;height:8px;border-radius:50%;background:${n.dot}"></span>
+      <span style="font-size:10.5px;font-weight:${state.tab === n.key ? "600" : "400"}">${esc(n.label.replace("My dashboard", "Home").replace("Team log", "Team"))}</span>
+      ${n.badge ? `<span style="position:absolute;top:0;right:2px;width:7px;height:7px;border-radius:50%;background:#e8b45c"></span>` : ""}
+    </button>`).join("");
+
   return `
-<div style="min-height:100vh;display:grid;grid-template-columns:236px 1fr;background:#f2f0eb">
-  <aside style="background:${DARK};color:#f2f0eb;padding:22px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh">
+<div class="app-shell" style="min-height:100vh;display:grid;grid-template-columns:236px 1fr;background:#f2f0eb">
+  <aside class="sidebar" style="background:${DARK};color:#f2f0eb;padding:22px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh">
     <div style="display:flex;align-items:center;gap:9px;padding:0 8px">
       <div style="width:24px;height:24px;border-radius:7px;background:#7fd6a2"></div>
       <span style="font:600 14.5px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
@@ -539,13 +546,25 @@ function renderApp() {
       <button data-action="logout" style="margin-left:auto;background:none;border:0;color:rgba(242,240,235,.4);font-size:11px;cursor:pointer">Logout</button>
     </div>
   </aside>
-  <main style="padding:30px 36px 56px;max-width:1180px">
+
+  <div class="mobile-topbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:20px;height:20px;border-radius:6px;background:#7fd6a2"></div>
+      <span style="font:600 13px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:rgba(242,240,235,.75)">
+      <span>${view.doneDays}/${view.effectiveTarget}${view.won ? " 🏆" : ""}</span>
+      <button data-action="logout" style="background:none;border:0;color:rgba(242,240,235,.5);font-size:11px;cursor:pointer;font-family:inherit">Logout</button>
+    </div>
+  </div>
+
+  <main class="main-content" style="padding:30px 36px 56px;max-width:1180px">
     <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:26px;flex-wrap:wrap">
       <div>
         <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.11em;text-transform:uppercase;color:rgba(23,22,15,.45);margin-bottom:9px">${titles[state.tab][0]}</div>
         <h1 style="margin:0;font:600 30px/1.12 'Archivo',sans-serif;letter-spacing:-.02em">${titles[state.tab][1]}</h1>
       </div>
-      <div style="display:flex;align-items:center;gap:8px">
+      <div class="header-actions" style="display:flex;align-items:center;gap:8px">
         <div style="display:flex;align-items:center;gap:7px;height:36px;padding:0 12px;border-radius:8px;background:#fff;border:1px solid rgba(23,22,15,.1);font-size:12.5px;color:rgba(23,22,15,.6)">
           <span style="width:6px;height:6px;border-radius:50%;background:#7fd6a2"></span>${fmtShort(addDays(today, -6))} – ${fmtShort(today)}
         </div>
@@ -554,6 +573,9 @@ function renderApp() {
     </header>
     ${body}
   </main>
+
+  <nav class="mobile-tabbar">${mobileNav}</nav>
+  <button class="fab-log-btn" data-action="open-log" aria-label="Log a session">+</button>
 </div>
 ${state.logOpen ? renderLogModal(view, me) : ""}`;
 }
@@ -689,8 +711,8 @@ function renderHome(me, view) {
   return `
 <div style="display:flex;flex-direction:column;gap:20px">
   ${trophyBanner}
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">${kpiHtml}</div>
-  <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px">
+  <div class="kpi-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">${kpiHtml}</div>
+  <div class="two-col" style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px">
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">${esc(hLabel)}</h3>
@@ -875,7 +897,7 @@ function renderTeam(me) {
       ${rows || `<div style="padding:20px 0;color:rgba(23,22,15,.4);font-size:13px">No members in this squad.</div>`}
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+  <div class="two-col" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Minutes by day</h3>
       <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.45)">${me.is_admin ? "Whole group" : esc(me.squad)} · ${esc(label)}</p>
@@ -916,7 +938,7 @@ function renderExclusions(me) {
     </div>`).join("");
 
   return `
-<div style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px;align-items:start">
+<div class="two-col" style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px;align-items:start">
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:22px">
     <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Request an exclusion</h3>
     <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${sharedTarget} for the month. Public holidays are auto-excluded for everyone.</p>
@@ -925,7 +947,7 @@ function renderExclusions(me) {
         <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:8px">Reason</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">${reasons}</div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="form-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">From</span><input type="date" data-bind="excFrom" value="${esc(state.excFrom)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px"></label>
         <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">To</span><input type="date" data-bind="excTo" value="${esc(state.excTo)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px"></label>
       </div>
@@ -1034,16 +1056,16 @@ function renderAdmin() {
 
   return `
 <div style="display:flex;flex-direction:column;gap:16px">
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">${statsHtml}</div>
+  <div class="admin-stats-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">${statsHtml}</div>
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
     <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Create an account for a friend</h3>
     <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Set them up directly and share the credentials — they can change the password later if they want. You stay signed in as yourself the whole time.</p>
     ${createdPanel}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+    <div class="form-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
       <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Name</span><input data-bind="newMemberName" value="${esc(state.newMemberName)}" placeholder="Full name" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px"></label>
       <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Squad</span><select data-bind="newMemberSquad" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px">${squadOptions}</select></label>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+    <div class="form-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Email</span><input type="email" data-bind="newMemberEmail" value="${esc(state.newMemberEmail)}" placeholder="friend@example.com" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px"></label>
       <label style="display:flex;flex-direction:column;gap:7px"><span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Password <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">auto-generated, editable</span></span><input data-bind="newMemberPassword" value="${esc(state.newMemberPassword)}" style="height:40px;padding:0 11px;border:1px solid rgba(23,22,15,.14);border-radius:8px;background:#fff;font-size:13px;font-family:'IBM Plex Mono',monospace"></label>
     </div>

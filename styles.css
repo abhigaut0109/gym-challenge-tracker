@@ -1,4 +1,5 @@
 * { box-sizing: border-box; }
+html, body { overflow-x: hidden; max-width: 100%; }
 body {
   margin: 0;
   background: #f2f0eb;
@@ -25,3 +26,89 @@ input[type="range"] { accent-color: #2f6d4f; }
 
 ::-webkit-scrollbar { height: 8px; width: 8px; }
 ::-webkit-scrollbar-thumb { background: rgba(23, 22, 15, .18); border-radius: 20px; }
+
+/* ===========================================================================
+   Responsive layout
+   The app is built with inline styles (see app.js) for the design's colors
+   and one-off spacing. These rules retrofit responsiveness by targeting the
+   handful of structural elements that carry a class name, overriding their
+   inline grid-template-columns / display with !important where needed since
+   an inline style otherwise always wins over an external stylesheet.
+   =========================================================================== */
+
+.mobile-topbar, .mobile-tabbar, .fab-log-btn { display: none; }
+
+/* Grid items don't shrink below their content's intrinsic min-width by
+   default — without this, a wide descendant (like the Team Log table's
+   min-width:820px) forces the whole grid track, and the shell, to stay
+   wide even under a 1fr track. This is the standard fix. */
+.main-content { min-width: 0; }
+
+@media (max-width: 880px) {
+  .app-shell { grid-template-columns: 1fr !important; }
+  .sidebar { display: none !important; }
+  .main-content {
+    padding: 76px 16px 88px !important;
+    max-width: 100% !important;
+  }
+  .header-actions { width: 100%; }
+  .header-actions > div:first-child { display: none; } /* the "Aug 8 – Aug 14" pill — redundant with content below on mobile */
+  .header-actions button { flex: 1; }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 30;
+    height: 56px;
+    padding: 0 16px;
+    background: #17160f;
+  }
+  .mobile-tabbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 30;
+    background: #17160f;
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom, 0px));
+  }
+  .fab-log-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    right: 18px;
+    bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+    z-index: 31;
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    border: 0;
+    background: #7fd6a2;
+    color: #17160f;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(23, 22, 15, .3);
+  }
+
+  .kpi-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .two-col { grid-template-columns: 1fr !important; }
+  .form-2col { grid-template-columns: 1fr !important; }
+  .admin-stats-grid { grid-template-columns: 1fr !important; }
+
+  .login-shell { grid-template-columns: 1fr !important; min-height: auto !important; }
+  .login-hero { padding: 28px 22px !important; }
+  .login-hero-content { margin: 0 !important; gap: 14px !important; }
+  .hero-illustration { max-width: 220px; margin: 0 auto; }
+  .hero-illustration svg { width: 100%; height: auto; }
+  .hero-title { font-size: 30px !important; }
+}
+
+@media (max-width: 420px) {
+  .kpi-grid { grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+}
