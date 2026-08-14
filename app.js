@@ -30,13 +30,17 @@ const state = {
   joinSquad: CHALLENGE.squads[0],
   tab: "home",
   logOpen: false,
+  editingSessionId: null,
   logDate: "",
   dur: CHALLENGE.minMinutes,
-  type: CHALLENGE.sessionTypes[0],
+  types: [CHALLENGE.sessionTypes[0]],
   note: "",
   range: "This week",
   customFrom: "",
   customTo: "",
+  homeRange: "This week",
+  homeCustomFrom: "",
+  homeCustomTo: "",
   squadFilter: "All squads",
   reason: CHALLENGE.exclusionReasons[0],
   excFrom: "",
@@ -105,6 +109,9 @@ function fmtShort(d) {
 function fmtMonth(d) {
   return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
+function fmtMins(n) {
+  return `${n} min${n === 1 ? "" : "s"}`;
+}
 function dowShort(d) {
   return d.toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
 }
@@ -137,6 +144,9 @@ function dateList(from, to) {
   }
   return out;
 }
+function challengeStart() {
+  return parseISO(CHALLENGE.startDate);
+}
 
 // ---------------------------------------------------------------------------
 // derived / business logic
@@ -164,15 +174,49 @@ function dailyMinutesMap(memberId) {
   return map;
 }
 
+// The base target (before personal exclusions) for a given calendar month:
+// the full monthly target, except the challenge's first month, which is
+// prorated from the kickoff date, and any month before the challenge
+// started, which has no target at all.
+function baseTargetForMonth(monthStart) {
+  const start = challengeStart();
+  const startMonth = startOfMonth(start);
+  if (monthStart.getTime() < startMonth.getTime()) return 0;
+  if (monthStart.getTime() > startMonth.getTime()) return CHALLENGE.monthlyTargetDays;
+  const daysInMonth = endOfMonth(monthStart).getDate();
+  const eligibleDays = daysInMonth - start.getDate() + 1;
+  return Math.max(0, Math.ceil(CHALLENGE.monthlyTargetDays * eligibleDays / daysInMonth));
+}
+
+// The target shown in shared, member-agnostic captions: the base target
+// minus public holidays (which apply to everyone), but not anyone's
+// personal exclusions — those vary per member, so they're only reflected
+// in that member's own effectiveTarget.
+function sharedEffectiveTarget(monthStart) {
+  const base = baseTargetForMonth(monthStart);
+  const start = challengeStart();
+  const monthEnd = endOfMonth(monthStart);
+  let holidayCount = 0;
+  for (let day = 1; day <= monthEnd.getDate(); day++) {
+    const date = new Date(monthStart.getFullYear(), monthStart.getMonth(), day);
+    if (date.getTime() < start.getTime()) continue;
+    if (isHoliday(isoDate(date))) holidayCount++;
+  }
+  return Math.max(0, base - holidayCount);
+}
+
 // Progress toward the monthly challenge target for one calendar month.
 function computeMonthProgress(memberId, monthStart) {
-  const target = CHALLENGE.monthlyTargetDays, min = CHALLENGE.minMinutes;
+  const min = CHALLENGE.minMinutes;
+  const start = challengeStart();
+  const baseTarget = baseTargetForMonth(monthStart);
   const dm = dailyMinutesMap(memberId);
   const monthEnd = endOfMonth(monthStart);
   const totalDaysInMonth = monthEnd.getDate();
   let doneDays = 0, excusedCount = 0, personalExcusedCount = 0, totalMinutes = 0;
   for (let day = 1; day <= totalDaysInMonth; day++) {
     const date = new Date(monthStart.getFullYear(), monthStart.getMonth(), day);
+    if (date.getTime() < start.getTime()) continue; // before the challenge existed
     const iso = isoDate(date);
     const mins = dm[iso] || 0;
     totalMinutes += mins;
@@ -185,49 +229,18 @@ function computeMonthProgress(memberId, monthStart) {
       doneDays++;
     }
   }
-  const effectiveTarget = Math.max(0, target - excusedCount);
-  const won = doneDays >= effectiveTarget;
-  return { doneDays, excusedCount, personalExcusedCount, effectiveTarget, totalMinutes, won, monthStart, monthEnd };
-}
-
-// A rolling 7-day strip (today and the previous 6 days) for the home dashboard.
-function computeRollingStrip(memberId) {
-  const min = CHALLENGE.minMinutes;
-  const dm = dailyMinutesMap(memberId);
-  const today = todayDate();
-  const start = addDays(today, -6);
-  const days = [];
-  let totalMinutes = 0;
-  for (let i = 0; i < 7; i++) {
-    const date = addDays(start, i);
-    const iso = isoDate(date);
-    const mins = dm[iso] || 0;
-    totalMinutes += mins;
-    const holiday = isHoliday(iso);
-    const excused = holiday || isApprovedExclusion(memberId, iso);
-    let entry;
-    if (excused) {
-      entry = { big: "—", small: holiday ? "holiday" : "excused", bg: "rgba(232,180,92,.14)", border: "rgba(232,180,92,.35)", fg: "#8a6420", sub: "rgba(138,100,32,.7)" };
-    } else if (mins >= min) {
-      entry = { big: mins + "'", small: "logged", bg: "#e4ece6", border: "rgba(47,109,79,.25)", fg: GREEN, sub: "rgba(47,109,79,.65)" };
-    } else if (mins > 0) {
-      entry = { big: mins + "'", small: "under " + min, bg: "#eef4f0", border: "rgba(47,109,79,.18)", fg: "#5d7f6c", sub: "rgba(23,22,15,.4)" };
-    } else if (date.getTime() === today.getTime()) {
-      entry = { big: "·", small: "today", bg: "#fbfaf7", border: "rgba(23,22,15,.09)", fg: "rgba(23,22,15,.32)", sub: "rgba(23,22,15,.28)" };
-    } else {
-      entry = { big: "0", small: "missed", bg: "#eceae4", border: "rgba(23,22,15,.1)", fg: "rgba(23,22,15,.35)", sub: "rgba(23,22,15,.3)" };
-    }
-    days.push({ date: iso, dow: dowShort(date), mins, excused, ...entry });
-  }
-  return { days, totalMinutes };
+  const effectiveTarget = Math.max(0, baseTarget - excusedCount);
+  const won = baseTarget > 0 && doneDays >= effectiveTarget;
+  return { doneDays, excusedCount, personalExcusedCount, baseTarget, effectiveTarget, totalMinutes, won, monthStart, monthEnd };
 }
 
 function computeStreak(memberId) {
   const today = todayDate();
+  const startMonth = startOfMonth(challengeStart());
   let cursor = startOfMonth(today);
   if (today < endOfMonth(cursor)) cursor = addMonths(cursor, -1);
   let count = 0;
-  while (count < 60) {
+  while (count < 60 && cursor.getTime() >= startMonth.getTime()) {
     const view = computeMonthProgress(memberId, cursor);
     if (!view.won) break;
     count++;
@@ -248,9 +261,12 @@ function computeRank(memberId) {
 function hasWonCurrentMonth(memberId) {
   return computeMonthProgress(memberId, startOfMonth(todayDate())).won;
 }
-function rangeToDates() {
+
+// Generic range resolver — used by both the Team Log filters and the Home
+// dashboard's own range picker, each with their own bit of state.
+function computeRangeBounds(rangeValue, customFrom, customTo) {
   const today = todayDate();
-  switch (state.range) {
+  switch (rangeValue) {
     case "This week":
       return { from: addDays(today, -6), to: today, label: "This week" };
     case "This month": {
@@ -263,17 +279,21 @@ function rangeToDates() {
       const end = endOfQuarter(from);
       return { from, to: today < end ? today : end, label: "This quarter" };
     }
-    case "Full cycle": {
-      const earliest = state.sessions.reduce((min, s) => (s.session_date < min ? s.session_date : min), isoDate(today));
-      return { from: parseISO(earliest), to: today, label: "Full cycle" };
-    }
+    case "Full cycle":
+      return { from: challengeStart(), to: today, label: "Full cycle" };
     case "Custom": {
-      if (state.customFrom && state.customTo) return { from: parseISO(state.customFrom), to: parseISO(state.customTo), label: "Custom range" };
+      if (customFrom && customTo) return { from: parseISO(customFrom), to: parseISO(customTo), label: "Custom range" };
       return { from: addDays(today, -6), to: today, label: "Custom range" };
     }
     default:
       return { from: addDays(today, -6), to: today, label: "This week" };
   }
+}
+function rangeToDates() {
+  return computeRangeBounds(state.range, state.customFrom, state.customTo);
+}
+function homeRangeToDates() {
+  return computeRangeBounds(state.homeRange, state.homeCustomFrom, state.homeCustomTo);
 }
 function filteredMembers() {
   if (state.squadFilter === "All squads") return state.members;
@@ -299,6 +319,20 @@ function rowStatus(memberId, from, to) {
   const ok = cleared >= target;
   const behind = cleared >= target - 2;
   return { total, cleared, excused, status: ok ? "CLEAR" : behind ? "CLOSE" : "BEHIND" };
+}
+
+// Bucket one member's minutes, by weekday, across a date range — used for
+// the home dashboard's personal bar chart (works for any range length).
+function weekdayBuckets(memberId, dates) {
+  const dm = dailyMinutesMap(memberId);
+  const totals = {};
+  const order = [];
+  for (const d of dates) {
+    const key = dowShort(d);
+    if (!(key in totals)) { totals[key] = 0; order.push(key); }
+    totals[key] += dm[isoDate(d)] || 0;
+  }
+  return { totals, order };
 }
 
 // ---------------------------------------------------------------------------
@@ -340,24 +374,44 @@ function render() {
   root.innerHTML = state.screen === "login" ? renderLogin() : renderApp();
 }
 
+function heroIllustration() {
+  return `
+  <svg viewBox="0 0 420 300" style="width:100%;max-width:400px;height:auto" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="300" cy="90" r="130" fill="#7fd6a2" opacity="0.08"/>
+    <circle cx="300" cy="90" r="90" fill="none" stroke="#7fd6a2" stroke-opacity="0.25" stroke-width="1.5"/>
+    <path d="M60 190 A150 150 0 0 1 210 60" fill="none" stroke="#e8b45c" stroke-opacity="0.35" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 10"/>
+    <g transform="translate(90,150)">
+      <rect x="-4" y="-46" width="8" height="92" rx="4" fill="#f2f0eb"/>
+      <rect x="-70" y="-38" width="26" height="76" rx="9" fill="#7fd6a2"/>
+      <rect x="-84" y="-24" width="14" height="48" rx="6" fill="#7fd6a2" opacity="0.7"/>
+      <rect x="44" y="-38" width="26" height="76" rx="9" fill="#7fd6a2"/>
+      <rect x="70" y="-24" width="14" height="48" rx="6" fill="#7fd6a2" opacity="0.7"/>
+    </g>
+    <circle cx="230" cy="60" r="5" fill="#e8b45c"/>
+    <circle cx="255" cy="45" r="3" fill="#7fd6a2"/>
+    <circle cx="205" cy="35" r="3" fill="#e8b45c" opacity="0.6"/>
+  </svg>`;
+}
+
 function renderLogin() {
   const banner = state.error ? `<div style="margin-bottom:14px;padding:10px 13px;border-radius:9px;background:rgba(232,92,92,.12);color:#a33;font-size:12.5px">${esc(state.error)}</div>` : "";
   const info = state.info ? `<div style="margin-bottom:14px;padding:10px 13px;border-radius:9px;background:rgba(47,109,79,.1);color:${GREEN};font-size:12.5px">${esc(state.info)}</div>` : "";
   const demoHint = db.DEMO_MODE ? `<p style="margin:0;font-size:11.5px;color:rgba(23,22,15,.4);font-family:'IBM Plex Mono',monospace">Local demo — try riya@example.com / password123 (admin), or sign up your own.</p>` : "";
   return `
 <div style="min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr;background:#f2f0eb">
-  <div style="padding:56px 60px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb">
+  <div style="padding:48px 56px;display:flex;flex-direction:column;justify-content:space-between;background:${DARK};color:#f2f0eb;overflow:hidden">
     <div style="display:flex;align-items:center;gap:10px">
       <div style="width:26px;height:26px;border-radius:7px;background:#7fd6a2"></div>
       <span style="font:600 15px/1 'Archivo',sans-serif;letter-spacing:.02em">45×${CHALLENGE.monthlyTargetDays}</span>
     </div>
-    <div style="max-width:430px;display:flex;flex-direction:column;gap:22px">
-      <h1 style="margin:0;font:600 46px/1.06 'Archivo',sans-serif;letter-spacing:-.02em;text-wrap:pretty">${CHALLENGE.monthlyTargetDays} days.<br>${CHALLENGE.minMinutes} minutes.<br>Every month.</h1>
-      <p style="margin:0;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group challenge log. Mark your session, see everyone else's progress, and keep the streak honest.</p>
-      <div style="display:flex;gap:26px;padding-top:6px;font-family:'IBM Plex Mono',monospace">
-        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.monthlyTargetDays}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / month</div></div>
-        <div><div style="font-size:26px;font-weight:600;color:#7fd6a2">${CHALLENGE.minMinutes}</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">min / session</div></div>
-        <div><div style="font-size:26px;font-weight:600;color:#e8b45c">3</div><div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">valid excuses</div></div>
+    <div style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin:auto 0">
+      ${heroIllustration()}
+      <h1 style="margin:8px 0 0;font:600 44px/1.08 'Archivo',sans-serif;letter-spacing:-.02em">Show up.<br>Together.</h1>
+      <p style="margin:0;max-width:400px;font-size:15px;line-height:1.6;color:rgba(242,240,235,.66);text-wrap:pretty">The friend-group workout challenge — log it, track it, and win it together.</p>
+      <div style="display:flex;gap:26px;padding-top:10px;font-family:'IBM Plex Mono',monospace">
+        <div><div style="font-size:22px;font-weight:600;color:#7fd6a2">${CHALLENGE.monthlyTargetDays}</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">days / month</div></div>
+        <div><div style="font-size:22px;font-weight:600;color:#7fd6a2">${CHALLENGE.minMinutes}</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">min / session</div></div>
+        <div><div style="font-size:22px;font-weight:600;color:#e8b45c">3</div><div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:rgba(242,240,235,.45);margin-top:4px">valid excuses</div></div>
       </div>
     </div>
     <div style="font-size:12px;color:rgba(242,240,235,.4);font-family:'IBM Plex Mono',monospace">${esc(CHALLENGE.cycleLabel)} · ${db.DEMO_MODE ? "local demo mode" : "live"}</div>
@@ -478,7 +532,7 @@ function renderApp() {
     <div style="display:flex;align-items:center;gap:9px;padding:8px;border-top:1px solid rgba(242,240,235,.1)">
       <div style="width:28px;height:28px;border-radius:50%;background:${avBg};color:${avFg};display:flex;align-items:center;justify-content:center;font:600 11px 'IBM Plex Mono',monospace">${initialsOf(me.name)}</div>
       <div style="line-height:1.25"><div style="font-size:12.5px;font-weight:500">${esc(me.name)}</div><div style="font-size:10.5px;color:rgba(242,240,235,.42)">${esc(me.email)}</div></div>
-      <button data-action="logout" style="margin-left:auto;background:none;border:0;color:rgba(242,240,235,.4);font-size:11px;cursor:pointer">Exit</button>
+      <button data-action="logout" style="margin-left:auto;background:none;border:0;color:rgba(242,240,235,.4);font-size:11px;cursor:pointer">Logout</button>
     </div>
   </aside>
   <main style="padding:30px 36px 56px;max-width:1180px">
@@ -506,7 +560,7 @@ function computeFeed() {
     const m = state.members.find((mm) => mm.id === s.member_id);
     if (!m) continue;
     const valid = s.minutes >= CHALLENGE.minMinutes;
-    items.push({ ts: s.created_at, name: m.name, action: `logged ${s.minutes} min`, meta: `${s.type}${s.note ? " · " + s.note : ""} · ${s.session_date}`, tag: valid ? "Valid" : "Short" });
+    items.push({ ts: s.created_at, name: m.name, action: `logged ${fmtMins(s.minutes)}`, meta: `${s.type}${s.note ? " · " + s.note : ""} · ${s.session_date}`, tag: valid ? "Valid" : "Short" });
   }
   for (const e of state.exclusions) {
     const m = state.members.find((mm) => mm.id === e.member_id);
@@ -521,7 +575,7 @@ function computeFlags() {
   for (const s of state.sessions) {
     const m = state.members.find((mm) => mm.id === s.member_id);
     if (!m) continue;
-    if (s.minutes >= 100) flags.push({ name: m.name, what: `logged ${s.minutes} min — unusually long session`, when: s.session_date });
+    if (s.minutes >= 100) flags.push({ name: m.name, what: `logged ${fmtMins(s.minutes)} — unusually long session`, when: s.session_date });
     const created = new Date(s.created_at);
     const logged = parseISO(s.session_date);
     if ((created - logged) / 86400000 > 7) flags.push({ name: m.name, what: `logged for ${s.session_date}, more than 7 days after the fact`, when: isoDate(created) });
@@ -531,13 +585,20 @@ function computeFlags() {
 
 function renderHome(me, view) {
   const rank = computeRank(me.id);
-  const strip = computeRollingStrip(me.id);
   const snap = currentMonthSnapshot();
   const monthlyMinutesAll = snap.reduce((a, s) => a + s.view.totalMinutes, 0);
   const groupMedian = state.members.length ? Math.round(monthlyMinutesAll / state.members.length) : 0;
-  const avg7 = strip.days.filter((d) => d.mins > 0).length ? Math.round(strip.totalMinutes / strip.days.filter((d) => d.mins > 0).length) : 0;
-  const longest7 = Math.max(0, ...strip.days.map((d) => d.mins));
   const streak = computeStreak(me.id);
+
+  const { from: hFrom, to: hTo, label: hLabel } = homeRangeToDates();
+  const hDates = dateList(hFrom, hTo);
+  const { totals: bucketTotals, order: bucketOrder } = weekdayBuckets(me.id, hDates);
+  const rangeTotalMinutes = Object.values(bucketTotals).reduce((a, b) => a + b, 0);
+  const dm = dailyMinutesMap(me.id);
+  const daysWithSessions = hDates.filter((d) => (dm[isoDate(d)] || 0) > 0).length;
+  const avgRange = daysWithSessions ? Math.round(rangeTotalMinutes / daysWithSessions) : 0;
+  const longestRange = Math.max(0, ...hDates.map((d) => dm[isoDate(d)] || 0));
+  const maxBucket = Math.max(1, ...Object.values(bucketTotals));
 
   const trophyBanner = view.won ? `
   <div style="background:linear-gradient(135deg, rgba(232,180,92,.2), rgba(232,180,92,.06));border:1px solid rgba(232,180,92,.4);border-radius:14px;padding:16px 20px;display:flex;align-items:center;gap:14px">
@@ -561,14 +622,28 @@ function renderHome(me, view) {
       <div style="font-size:12px;color:rgba(23,22,15,.5)">${esc(k.note)}</div>
     </div>`).join("");
 
-  const stripHtml = strip.days.map((d) => `
-    <div style="display:flex;flex-direction:column;gap:7px;align-items:center">
-      <div style="font-size:11px;font-weight:600;color:rgba(23,22,15,.4);letter-spacing:.06em">${d.dow}</div>
-      <div style="width:100%;height:96px;border-radius:10px;border:1px solid ${d.border};background:${d.bg};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px">
-        <span style="font:600 15px 'IBM Plex Mono',monospace;color:${d.fg}">${d.big}</span>
-        <span style="font-size:10px;color:${d.sub}">${d.small}</span>
-      </div>
+  const homeRanges = ["This week", "This month", "This quarter", "Full cycle", "Custom"].map((r) => `
+    <button data-action="set-home-range" data-range="${r}" style="height:26px;padding:0 10px;border-radius:20px;cursor:pointer;font-size:11.5px;font-weight:${state.homeRange === r ? "600" : "400"};border:1px solid ${state.homeRange === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.homeRange === r ? "#17160f" : "#fff"};color:${state.homeRange === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${r}</button>`).join("");
+
+  const barsHtml = bucketOrder.map((k) => `
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
+      <span style="font:600 10.5px 'IBM Plex Mono',monospace;color:rgba(23,22,15,.5)">${bucketTotals[k]}</span>
+      <div style="width:100%;height:${Math.round((bucketTotals[k] / maxBucket) * 100)}%;min-height:2px;border-radius:7px 7px 3px 3px;background:${GREEN}"></div>
+      <span style="font-size:10.5px;font-weight:600;color:rgba(23,22,15,.4)">${k}</span>
     </div>`).join("");
+
+  const mySessions = state.sessions.filter((s) => s.member_id === me.id).sort((a, b) => b.session_date.localeCompare(a.session_date) || new Date(b.created_at) - new Date(a.created_at)).slice(0, 8);
+  const mySessionsHtml = mySessions.map((s) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid rgba(23,22,15,.07)">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:rgba(23,22,15,.45);width:64px;flex:none">${fmtShort(parseISO(s.session_date))}</span>
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:500">${fmtMins(s.minutes)} <span style="font-weight:400;color:rgba(23,22,15,.55)">· ${esc(s.type)}</span></div>
+        ${s.note ? `<div style="font-size:11.5px;color:rgba(23,22,15,.42);margin-top:2px">${esc(s.note)}</div>` : ""}
+      </div>
+      <span style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.05em;padding:3px 7px;border-radius:20px;background:${s.minutes >= CHALLENGE.minMinutes ? "#e4ece6" : "#eceae4"};color:${s.minutes >= CHALLENGE.minMinutes ? GREEN : "rgba(23,22,15,.5)"};flex:none">${s.minutes >= CHALLENGE.minMinutes ? "VALID" : "SHORT"}</span>
+      <button data-action="edit-session" data-id="${s.id}" style="background:none;border:1px solid rgba(23,22,15,.16);border-radius:6px;height:26px;padding:0 9px;font-size:11px;cursor:pointer;flex:none">Edit</button>
+      <button data-action="delete-session" data-id="${s.id}" style="background:none;border:0;color:rgba(23,22,15,.35);font-size:11px;cursor:pointer;flex:none">Delete</button>
+    </div>`).join("") || `<div style="padding:14px 0;color:rgba(23,22,15,.4);font-size:13px">Nothing logged yet — hit "Log a session" to start.</div>`;
 
   const won = snap.filter((s) => s.view.won).length;
   const onExclusion = snap.filter((s) => !s.view.won && s.view.personalExcusedCount > 0).length;
@@ -608,15 +683,23 @@ function renderHome(me, view) {
   <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px">${kpiHtml}</div>
   <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px">
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:18px">
-        <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Last 7 days</h3>
-        <span style="font-size:12px;color:rgba(23,22,15,.45);font-family:'IBM Plex Mono',monospace">${strip.totalMinutes} min total</span>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">${esc(hLabel)}</h3>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${homeRanges}</div>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:9px">${stripHtml}</div>
+      ${state.homeRange === "Custom" ? `
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:14px">
+        <input type="date" data-bind="homeCustomFrom" value="${esc(state.homeCustomFrom)}" max="${isoDate(todayDate())}" style="height:30px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:11.5px">
+        <span style="color:rgba(23,22,15,.35);font-size:12px">to</span>
+        <input type="date" data-bind="homeCustomTo" value="${esc(state.homeCustomTo)}" max="${isoDate(todayDate())}" style="height:30px;padding:0 8px;border:1px solid rgba(23,22,15,.14);border-radius:7px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:11.5px">
+        <button data-action="apply-home-range" style="height:30px;padding:0 10px;border:0;border-radius:7px;background:#17160f;color:#fff;font-size:11.5px;cursor:pointer">Apply</button>
+      </div>` : ""}
+      <div style="font:600 26px 'IBM Plex Mono',monospace;color:${DARK};margin-bottom:14px">${rangeTotalMinutes} <span style="font-size:13px;font-weight:500;color:rgba(23,22,15,.45)">min total</span></div>
+      <div style="display:flex;align-items:flex-end;gap:10px;height:130px">${barsHtml}</div>
       <div style="margin-top:16px;padding-top:15px;border-top:1px solid rgba(23,22,15,.08);display:flex;gap:20px;font-size:12px;color:rgba(23,22,15,.5)">
         <span>Streak <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${streak} months</strong></span>
-        <span>Avg session (7d) <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avg7} min</strong></span>
-        <span>Longest (7d) <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${longest7} min</strong></span>
+        <span>Avg session <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${avgRange} min</strong></span>
+        <span>Longest day <strong style="font-family:'IBM Plex Mono',monospace;color:#17160f">${longestRange} min</strong></span>
       </div>
     </div>
     <div style="background:${DARK};color:#f2f0eb;border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:16px">
@@ -642,6 +725,11 @@ function renderHome(me, view) {
     </div>
   </div>
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
+    <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Your recent sessions</h3>
+    <p style="margin:0 0 6px;font-size:12.5px;color:rgba(23,22,15,.45)">Made a mistake or logged a duplicate? Edit or delete it here.</p>
+    <div style="display:flex;flex-direction:column">${mySessionsHtml}</div>
+  </div>
+  <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
     <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
       <h3 style="margin:0;font:600 15px/1 'Archivo',sans-serif">Latest from the floor</h3>
       <button data-action="switch-tab" data-tab="team" style="background:none;border:0;font-size:12.5px;color:#2f6d4f;cursor:pointer;font-weight:500">See full log →</button>
@@ -657,6 +745,7 @@ function renderTeam(me) {
   const showDayGrid = dates.length <= 7;
   const min = CHALLENGE.minMinutes;
   const members = filteredMembers();
+  const sharedTarget = sharedEffectiveTarget(startOfMonth(todayDate()));
 
   const ranges = ["This week", "This month", "This quarter", "Full cycle", "Custom"].map((r) => `
     <button data-action="set-range" data-range="${r}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.range === r ? "600" : "400"};border:1px solid ${state.range === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.range === r ? "#17160f" : "#fff"};color:${state.range === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${r}</button>`).join("");
@@ -674,8 +763,8 @@ function renderTeam(me) {
         const mins = dm[iso] || 0;
         const excused = isExcludedDay(m.id, iso);
         if (excused) return `<div title="${fmtShort(d)} — excused" style="height:34px;border-radius:7px;background:rgba(232,180,92,.2);color:#8a6420;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">EX</div>`;
-        if (mins >= min) return `<div title="${fmtShort(d)} — ${mins} min" style="height:34px;border-radius:7px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
-        if (mins > 0) return `<div title="${fmtShort(d)} — ${mins} min (under ${min})" style="height:34px;border-radius:7px;background:${PALE};color:#1e4633;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
+        if (mins >= min) return `<div title="${fmtShort(d)} — ${fmtMins(mins)}" style="height:34px;border-radius:7px;background:${GREEN};color:#fff;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
+        if (mins > 0) return `<div title="${fmtShort(d)} — ${fmtMins(mins)} (under ${min})" style="height:34px;border-radius:7px;background:${PALE};color:#1e4633;display:flex;align-items:center;justify-content:center;font:600 11.5px 'IBM Plex Mono',monospace">${mins}</div>`;
         return `<div title="${fmtShort(d)} — no session" style="height:34px;border-radius:7px;background:#eceae4"></div>`;
       }).join("");
     }
@@ -779,7 +868,7 @@ function renderTeam(me) {
     </div>
     <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:20px 22px">
       <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Squad standings</h3>
-      <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members who've cleared ${CHALLENGE.monthlyTargetDays} days this month</p>
+      <p style="margin:0 0 16px;font-size:12.5px;color:rgba(23,22,15,.45)">Compliance = members who've cleared ${sharedTarget} days this month</p>
       <div style="display:flex;flex-direction:column;gap:12px">${squadsHtml}</div>
     </div>
   </div>
@@ -787,6 +876,7 @@ function renderTeam(me) {
 }
 
 function renderExclusions(me) {
+  const sharedTarget = sharedEffectiveTarget(startOfMonth(todayDate()));
   const reasons = CHALLENGE.exclusionReasons.map((r) => `
     <button data-action="set-reason" data-reason="${esc(r)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.reason === r ? "600" : "400"};border:1px solid ${state.reason === r ? "transparent" : "rgba(23,22,15,.15)"};background:${state.reason === r ? "#17160f" : "#fff"};color:${state.reason === r ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${esc(r)}</button>`).join("");
 
@@ -814,7 +904,7 @@ function renderExclusions(me) {
 <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px;align-items:start">
   <div style="background:#fff;border:1px solid rgba(23,22,15,.09);border-radius:14px;padding:22px">
     <h3 style="margin:0 0 4px;font:600 15px/1 'Archivo',sans-serif">Request an exclusion</h3>
-    <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${CHALLENGE.monthlyTargetDays} for the month. Public holidays are auto-excluded for everyone.</p>
+    <p style="margin:0 0 18px;font-size:12.5px;color:rgba(23,22,15,.5);line-height:1.55">Sick days, travel and declared holidays don't count against your ${sharedTarget} for the month. Public holidays are auto-excluded for everyone.</p>
     <div style="display:flex;flex-direction:column;gap:14px">
       <div>
         <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:8px">Reason</div>
@@ -951,23 +1041,27 @@ function renderAdmin() {
 }
 
 function renderLogModal(view, me) {
-  const min = CHALLENGE.minMinutes;
+  const min = CHALLENGE.minMinutes, max = CHALLENGE.maxMinutes;
   const durColor = state.dur >= min ? GREEN : AMBER;
   const today = todayDate();
   const minDate = isoDate(addDays(today, -6));
   const maxDate = isoDate(today);
-  const presets = [30, 45, 60, 90].map((d) => `
+  const isEditing = !!state.editingSessionId;
+  const presetValues = [30, 45, 60, 90, 120].filter((d) => d <= max);
+  const presets = presetValues.map((d) => `
     <button data-action="set-dur-preset" data-dur="${d}" style="flex:1;height:32px;border-radius:8px;cursor:pointer;font-size:12.5px;font-family:'IBM Plex Mono',monospace;font-weight:${state.dur === d ? "600" : "400"};border:1px solid ${state.dur === d ? "transparent" : "rgba(23,22,15,.14)"};background:${state.dur === d ? "#17160f" : "#fff"};color:${state.dur === d ? "#f7f6f2" : "rgba(23,22,15,.7)"}">${d} min</button>`).join("");
-  const types = CHALLENGE.sessionTypes.map((t) => `
-    <button data-action="set-type" data-type="${esc(t)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${state.type === t ? "600" : "400"};border:1px solid ${state.type === t ? "transparent" : "rgba(23,22,15,.15)"};background:${state.type === t ? GREEN : "#fff"};color:${state.type === t ? "#fff" : "rgba(23,22,15,.7)"}">${esc(t)}</button>`).join("");
+  const types = CHALLENGE.sessionTypes.map((t) => {
+    const active = state.types.includes(t);
+    return `<button data-action="toggle-type" data-type="${esc(t)}" style="height:30px;padding:0 12px;border-radius:20px;cursor:pointer;font-size:12.5px;font-weight:${active ? "600" : "400"};border:1px solid ${active ? "transparent" : "rgba(23,22,15,.15)"};background:${active ? GREEN : "#fff"};color:${active ? "#fff" : "rgba(23,22,15,.7)"}">${esc(t)}</button>`;
+  }).join("");
   const nextDay = Math.min(view.effectiveTarget, view.doneDays + 1);
 
   return `
 <div data-action="close-log" style="position:fixed;inset:0;background:rgba(23,22,15,.5);display:flex;align-items:center;justify-content:center;padding:30px;z-index:40">
-  <div data-action="stop" style="width:100%;max-width:452px;background:#f7f6f2;border-radius:16px;padding:24px 26px 26px;animation:fadeUp .18s ease both;box-shadow:0 24px 60px rgba(23,22,15,.3)">
+  <div data-action="stop" style="width:100%;max-width:452px;background:#f7f6f2;border-radius:16px;padding:24px 26px 26px;animation:fadeUp .18s ease both;box-shadow:0 24px 60px rgba(23,22,15,.3);max-height:90vh;overflow:auto">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px">
       <div>
-        <h3 style="margin:0 0 4px;font:600 20px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">Log a session</h3>
+        <h3 style="margin:0 0 4px;font:600 20px/1.2 'Archivo',sans-serif;letter-spacing:-.01em">${isEditing ? "Edit session" : "Log a session"}</h3>
         <p style="margin:0;font-size:12.5px;color:rgba(23,22,15,.5)">You can backdate up to 7 days — no future dates.</p>
       </div>
       <button data-action="close-log" style="width:30px;height:30px;border:0;border-radius:8px;background:rgba(23,22,15,.06);cursor:pointer;font-size:15px;color:rgba(23,22,15,.5)">×</button>
@@ -978,32 +1072,33 @@ function renderLogModal(view, me) {
         <input type="date" data-bind="logDate" value="${esc(state.logDate)}" min="${minDate}" max="${maxDate}" style="height:40px;padding:0 12px;border:1px solid rgba(23,22,15,.14);border-radius:9px;background:#fff;font-family:'IBM Plex Mono',monospace;font-size:13.5px;outline:none">
       </label>
       <div>
-        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">Duration</div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">Duration <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">up to ${max} min</span></div>
         <div style="background:#fff;border:1px solid rgba(23,22,15,.1);border-radius:12px;padding:16px 18px">
           <div style="display:flex;align-items:baseline;gap:7px;margin-bottom:12px;font-family:'IBM Plex Mono',monospace">
             <span id="logDurValue" style="font-size:38px;font-weight:600;letter-spacing:-.03em;color:${durColor}">${state.dur}</span>
             <span style="font-size:14px;color:rgba(23,22,15,.45)">minutes</span>
             <span id="logDurVerdict" style="margin-left:auto;font-size:11.5px;font-weight:500;color:${durColor}">${state.dur >= min ? "counts as a valid day" : "under " + min + " min — won't count"}</span>
           </div>
-          <input id="logDurSlider" type="range" min="10" max="120" step="5" value="${state.dur}" style="width:100%;accent-color:#2f6d4f">
+          <input id="logDurSlider" type="range" min="10" max="${max}" step="5" value="${state.dur}" style="width:100%;accent-color:#2f6d4f">
           <div style="display:flex;gap:7px;margin-top:12px">${presets}</div>
         </div>
       </div>
       <div>
-        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">What did you do</div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600;margin-bottom:9px">What did you do <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">pick one or more</span></div>
         <div style="display:flex;gap:7px;flex-wrap:wrap">${types}</div>
       </div>
       <label style="display:flex;flex-direction:column;gap:8px">
         <span style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(23,22,15,.5);font-weight:600">Note <span style="font-weight:400;text-transform:none;letter-spacing:0;color:rgba(23,22,15,.35)">optional, visible to all</span></span>
         <input data-bind="note" value="${esc(state.note)}" placeholder="Leg day. Regret everything." style="height:40px;padding:0 12px;border:1px solid rgba(23,22,15,.14);border-radius:9px;background:#fff;font-size:13.5px;outline:none">
       </label>
-      <div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;background:rgba(47,109,79,.08)">
+      ${!isEditing ? `<div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;background:rgba(47,109,79,.08)">
         <span style="width:8px;height:8px;border-radius:50%;background:#2f6d4f"></span>
         <span style="font-size:12.5px;color:rgba(23,22,15,.65)">This will be day <strong>${nextDay}</strong> of ${view.effectiveTarget} this month.</span>
-      </div>
+      </div>` : ""}
       <div style="display:flex;gap:9px">
+        ${isEditing ? `<button data-action="delete-session" data-id="${state.editingSessionId}" style="flex:none;height:44px;padding:0 16px;border:1px solid rgba(200,80,80,.35);border-radius:10px;background:#fff;color:#a33;font-size:13.5px;cursor:pointer">Delete</button>` : ""}
         <button data-action="close-log" style="flex:none;height:44px;padding:0 16px;border:1px solid rgba(23,22,15,.16);border-radius:10px;background:#fff;font-size:13.5px;cursor:pointer">Cancel</button>
-        <button data-action="submit-log" style="flex:1;height:44px;border:0;border-radius:10px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:14px;cursor:pointer">Mark attendance</button>
+        <button data-action="submit-log" style="flex:1;height:44px;border:0;border-radius:10px;background:#17160f;color:#f2f0eb;font-weight:600;font-size:14px;cursor:pointer">${isEditing ? "Save changes" : "Mark attendance"}</button>
       </div>
     </div>
   </div>
@@ -1026,7 +1121,7 @@ function exportCsv() {
       const excused = isExcludedDay(m.id, iso);
       const daySessions = state.sessions.filter((s) => s.member_id === m.id && s.session_date === iso);
       if (mins === 0 && !excused) continue;
-      const types = daySessions.map((s) => s.type).join("/") || "";
+      const types = daySessions.map((s) => s.type).join(" / ") || "";
       const notes = daySessions.map((s) => s.note).filter(Boolean).join(" | ");
       const status = excused ? "EXCUSED" : mins >= CHALLENGE.minMinutes ? "VALID" : "SHORT";
       rows.push([m.name, m.squad, iso, mins, types, notes, status]);
@@ -1056,6 +1151,14 @@ async function withErrorHandling(fn) {
   }
 }
 
+function resetLogForm() {
+  state.dur = CHALLENGE.minMinutes;
+  state.types = [CHALLENGE.sessionTypes[0]];
+  state.note = "";
+  state.logDate = isoDate(todayDate());
+  state.editingSessionId = null;
+}
+
 root.addEventListener("click", async (ev) => {
   const el = ev.target.closest("[data-action]");
   if (!el) return;
@@ -1071,12 +1174,32 @@ root.addEventListener("click", async (ev) => {
     return;
   }
   if (action === "open-log") {
-    state.dur = CHALLENGE.minMinutes;
-    state.type = CHALLENGE.sessionTypes[0];
-    state.note = "";
-    state.logDate = isoDate(todayDate());
+    resetLogForm();
     state.logOpen = true;
     render();
+    return;
+  }
+  if (action === "edit-session") {
+    const s = state.sessions.find((ss) => ss.id === el.dataset.id);
+    if (!s) return;
+    state.editingSessionId = s.id;
+    state.logDate = s.session_date;
+    state.dur = s.minutes;
+    state.types = s.type ? s.type.split(",").map((t) => t.trim()).filter(Boolean) : [CHALLENGE.sessionTypes[0]];
+    state.note = s.note || "";
+    state.logOpen = true;
+    render();
+    return;
+  }
+  if (action === "delete-session") {
+    if (!confirm("Delete this session? This can't be undone.")) return;
+    await withErrorHandling(async () => {
+      await db.deleteSession(el.dataset.id);
+      state.logOpen = false;
+      state.editingSessionId = null;
+      await loadAll();
+      render();
+    });
     return;
   }
   if (action === "switch-tab") {
@@ -1089,8 +1212,13 @@ root.addEventListener("click", async (ev) => {
     render();
     return;
   }
-  if (action === "set-type") {
-    state.type = el.dataset.type;
+  if (action === "toggle-type") {
+    const t = el.dataset.type;
+    if (state.types.includes(t)) {
+      if (state.types.length > 1) state.types = state.types.filter((x) => x !== t);
+    } else {
+      state.types = [...state.types, t];
+    }
     render();
     return;
   }
@@ -1100,6 +1228,15 @@ root.addEventListener("click", async (ev) => {
     return;
   }
   if (action === "apply-custom-range") {
+    render();
+    return;
+  }
+  if (action === "set-home-range") {
+    state.homeRange = el.dataset.range;
+    render();
+    return;
+  }
+  if (action === "apply-home-range") {
     render();
     return;
   }
@@ -1195,9 +1332,20 @@ root.addEventListener("click", async (ev) => {
       render();
       return;
     }
+    if (!state.types.length) {
+      state.error = "Pick at least one type.";
+      render();
+      return;
+    }
     await withErrorHandling(async () => {
-      await db.logSession({ memberId: state.currentMemberId, date: state.logDate, minutes: state.dur, type: state.type, note: state.note.trim() });
+      const payload = { date: state.logDate, minutes: state.dur, type: state.types.join(", "), note: state.note.trim() };
+      if (state.editingSessionId) {
+        await db.updateSession(state.editingSessionId, payload);
+      } else {
+        await db.logSession({ memberId: state.currentMemberId, ...payload });
+      }
       state.logOpen = false;
+      state.editingSessionId = null;
       state.note = "";
       state.tab = "home";
       state.error = "";

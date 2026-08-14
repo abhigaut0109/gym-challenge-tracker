@@ -54,8 +54,13 @@ export const SUPABASE_ANON_KEY = "eyJhbG...";
 
 That's it — the app automatically switches from local demo mode to the
 shared database the moment both values are non-empty. You can also tune
-`CHALLENGE` in the same file (days/month needed to win, minutes/session,
-squads, session types, exclusion reasons).
+`CHALLENGE` in the same file: days/month needed to win, minutes/session,
+longest a session can be (`maxMinutes`), squads, session types, exclusion
+reasons, and `startDate` — the day the challenge actually kicked off. The
+first calendar month is automatically prorated from that date (e.g.
+starting on the 10th of a 31-day month with a 20-day target gives that
+month a ~15-day target), so nobody's penalized for days before the
+challenge existed.
 
 ## 3. Deploy for free
 
@@ -96,7 +101,12 @@ Any of these work identically since it's just static files.
   before.
 - **Logging is backdate-friendly, not future-friendly**: the log-session
   date picker allows today or up to 6 days back, never a future date (both
-  enforced in the UI and re-checked before the write goes through).
+  enforced in the UI and re-checked before the write goes through). A
+  session can log one or more types at once (Weights + Cardio, etc).
+- **You can edit or delete your own sessions** from the "Your recent
+  sessions" list on the dashboard — useful for fixing a wrong duration or
+  a duplicate entry. Nobody, including admins, can edit or delete someone
+  else's logged sessions.
 - **Nobody is admin by default.** Once your first friend signs up, promote
   them (or yourself) from Supabase's SQL Editor:
   ```sql

@@ -80,6 +80,7 @@ create policy "members update own row or admin"     on members for update using 
 
 create policy "sessions readable by signed-in users" on sessions for select using (auth.role() = 'authenticated');
 create policy "sessions insert own"                  on sessions for insert with check (member_id = auth.uid());
+create policy "sessions update own"                  on sessions for update using (member_id = auth.uid());
 create policy "sessions delete own"                  on sessions for delete using (member_id = auth.uid());
 
 create policy "exclusions readable by signed-in users" on exclusions for select using (auth.role() = 'authenticated');

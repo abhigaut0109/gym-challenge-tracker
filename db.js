@@ -331,6 +331,41 @@ export async function listSessions() {
   return data;
 }
 
+export async function updateSession(id, { date, minutes, type, note }) {
+  await ready();
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    const s = db.sessions.find((ss) => ss.id === id);
+    if (!s) throw new Error("Session not found.");
+    s.session_date = date;
+    s.minutes = minutes;
+    s.type = type;
+    s.note = note || null;
+    saveLocal(db);
+    return s;
+  }
+  const { data, error } = await supabase
+    .from("sessions")
+    .update({ session_date: date, minutes, type, note: note || null })
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteSession(id) {
+  await ready();
+  if (DEMO_MODE) {
+    const db = loadLocal();
+    db.sessions = db.sessions.filter((s) => s.id !== id);
+    saveLocal(db);
+    return;
+  }
+  const { error } = await supabase.from("sessions").delete().eq("id", id);
+  if (error) throw error;
+}
+
 export async function requestExclusion({ memberId, reason, from, to, note }) {
   await ready();
   if (DEMO_MODE) {
